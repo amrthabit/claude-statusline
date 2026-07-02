@@ -7,6 +7,23 @@ metrics from `/proc` + `/sys`, prints one compact color-coded line:
  launch ›  current │ Model ctx% 5h%reset 7d%reset │ BAT RAM CPU DISK IO NET
 ```
 
+Designed for a **Linux laptop**: it assumes `/proc` + `/sys/class/power_supply`
+(Linux-only — no macOS/BSD), shows a battery segment, and skips virtual
+NICs/loop devices when summing net and disk IO. On a desktop or VM it still
+works — the battery segment just disappears (every segment fails soft).
+
+## Prerequisites
+
+- **Linux** with `/proc` and `/sys` (any modern distro; battery segment needs
+  `/sys/class/power_supply/BAT*`)
+- **Build**: `gcc`, `make`, libc headers — Debian/Ubuntu:
+  `sudo apt install gcc make libc6-dev`
+- **Runtime**: none — plain libc binary, cJSON is vendored and compiled in
+- **A Nerd Font (v3)** in the terminal for glyphs (e.g. JetBrainsMono Nerd
+  Font); without one set `CLAUDE_STATUSLINE_NERD=0` for plain-text labels
+- `make test` (optional) additionally needs `python3` and `bash` for the
+  parity harness against the Python reference
+
 - **~1.8 ms/render** (26× the Python reference), fine for `refreshInterval: 1`.
 - Green / amber ≥70% / red ≥80% for RAM, CPU, disk, context, and plan usage.
   Battery inverted (amber ≤30%, red ≤15%, green while charging).
