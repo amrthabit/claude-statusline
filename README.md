@@ -3,7 +3,7 @@
 Claude Code statusline in C. Reads the status JSON on stdin, reads system
 metrics from `/proc` + `/sys`, prints one compact color-coded line:
 
-![statusline](docs/statusline.png)
+![statusline](docs/statusline-full.png)
 
 ```
  launch ›  current │ Model ctx% 5h%reset 7d%reset │ BAT RAM CPU DISK IO NET
