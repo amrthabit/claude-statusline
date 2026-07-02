@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Generate parity-test inputs. Time-sensitive resets_at values are computed
+relative to now with +30s margins so both implementations (run ms apart)
+format the same minute."""
+import json, sys, time, datetime as dt
+
+out = sys.argv[1] if len(sys.argv) > 1 else "test/inputs"
+now = time.time()
+
+def w(name, obj):
+    with open(f"{out}/{name}", "w") as f:
+        if isinstance(obj, str):
+            f.write(obj)
+        else:
+            json.dump(obj, f)
+
+# (a) captured real-schema payload shape
+w("a_real.json", {
+    "session_id": "parity-a",
+    "model": {"display_name": "Opus 4.8", "id": "claude-opus-4-8"},
+    "workspace": {"current_dir": "/home/amr/.claude", "project_dir": "/home/amr"},
+    "cwd": "/home/amr/.claude",
+    "context_window": {"used_percentage": 18},
+    "rate_limits": {
+        "five_hour": {"used_percentage": 2, "resets_at": int(now) + 2*3600 + 42*60 + 30},
+        "seven_day": {"used_percentage": 3, "resets_at": int(now) + 31*3600 + 30},
+    },
+})
+
+# (b) launch != current + long path needing middle elision
+w("b_dirs.json", {
+    "session_id": "parity-b",
+    "model": {"display_name": "Fable 5"},
+    "workspace": {
+        "current_dir": "/home/amr/tickets/PHPG1138-305/references/deep/nest",
+        "project_dir": "/home/amr/tickets/PHPG1138-305",
+    },
+    "context_window": {"used_percentage": 55},
+})
+
+# (c) free tier: no rate_limits, no context_window
+w("c_free.json", {
+    "session_id": "parity-c",
+    "model": {"display_name": "Haiku 4.5"},
+    "workspace": {"current_dir": "/home/amr", "project_dir": "/home/amr"},
+})
+
+# (d) empty stdin
+w("d_empty.json", "")
+
+# (e) garbage stdin
+w("e_garbage.json", "this is { not json ]][")
+
+# (f) ISO8601 + epoch-ms resets_at
+iso = (dt.datetime.now(dt.timezone.utc)
+       + dt.timedelta(hours=3, minutes=8, seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+w("f_iso.json", {
+    "session_id": "parity-f",
+    "model": {"display_name": "Opus 4.8"},
+    "workspace": {"current_dir": "/home/amr", "project_dir": "/home/amr"},
+    "rate_limits": {
+        "five_hour": {"used_percentage": 42, "resets_at": iso},
+        "seven_day": {"used_percentage": 7, "resets_at": int((now + 5*86400 + 30) * 1000)},
+    },
+})
+
+# (g) threshold edges: ctx 80 red, 5h 79 amber, 7d 80 red
+w("g_edges.json", {
+    "session_id": "parity-g",
+    "model": {"id": "claude-fable-5"},   # no display_name -> id fallback
+    "workspace": {"current_dir": "/home/amr", "project_dir": "/home/amr"},
+    "context_window": {"used_percentage": 80},
+    "rate_limits": {
+        "five_hour": {"used_percentage": 79, "resets_at": int(now) + 8*60 + 30},
+        "seven_day": {"used_percentage": 80},   # no resets_at -> "?"
+    },
+})
+
+# (h) ctx 70 amber boundary + missing model entirely
+w("h_edge2.json", {
+    "session_id": "parity-h",
+    "workspace": {"current_dir": "/home/amr/x", "project_dir": "/home/amr/x"},
+    "context_window": {"used_percentage": 70},
+})
+print("inputs generated")
