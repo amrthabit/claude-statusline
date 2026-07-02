@@ -1,7 +1,9 @@
 # statusline
 
-Claude Code statusline in C. Reads the status JSON on stdin, reads system
-metrics from `/proc` + `/sys`, prints one compact color-coded line:
+A fast, compact statusline for [Claude Code](https://claude.com/claude-code),
+written in C. It reads the status JSON Claude Code pipes on stdin, samples
+system metrics from `/proc` and `/sys`, and prints one color-coded line in
+about **1.8 ms** — cheap enough to refresh every second.
 
 ![statusline](docs/statusline-full.png)
 
@@ -9,34 +11,42 @@ metrics from `/proc` + `/sys`, prints one compact color-coded line:
  launch ›  current │ Model ctx% 5h%reset 7d%reset │ BAT RAM CPU DISK IO NET
 ```
 
-Designed for a **Linux laptop**: it assumes `/proc` + `/sys/class/power_supply`
-(Linux-only — no macOS/BSD), shows a battery segment, and skips virtual
-NICs/loop devices when summing net and disk IO. On a desktop or VM it still
-works — the battery segment just disappears (every segment fails soft).
+## Features
+
+- **Directories** — launch dir and current dir, collapsed into one when they
+  match, with `~` substitution and middle-elision for long paths
+- **Model + context** — active model name and context-window usage %
+- **Plan usage** — the 5-hour and 7-day rate-limit windows with a countdown to
+  each reset (`20%4h9m`), straight from the official `rate_limits` data Claude
+  Code provides — no transcript scraping or extra API calls
+- **Battery** — charge % with a level glyph, `⚡` while charging
+- **RAM & disk** — used % plus free space at a glance (`53%3.7G`)
+- **CPU, disk IO, network** — true rates computed from `/proc` deltas between
+  refreshes, persisted per session (concurrent Claude sessions don't corrupt
+  each other's readings)
+- **Color as the signal** — green when fine, amber at ≥70%, red at ≥80% for
+  percentages; battery inverted (amber ≤30%, red ≤15%); IO/net stay uncolored
+  until they cross 10 MiB/s (amber) or 30 MiB/s (red)
+- **Never breaks a render** — malformed stdin, missing fields, unreadable
+  `/proc`, corrupt state: every segment fails soft and is simply omitted
+- **Zero runtime dependencies** — a single plain-libc binary; cJSON is
+  vendored and compiled in
+
+Designed for a **Linux laptop**: it expects `/proc` + `/sys/class/power_supply`
+(Linux-only — no macOS/BSD) and skips loopback/virtual NICs and non-physical
+disks when summing traffic. On a desktop or VM it still works — the battery
+segment just disappears.
 
 ## Prerequisites
 
-- **Linux** with `/proc` and `/sys` (any modern distro; battery segment needs
-  `/sys/class/power_supply/BAT*`)
-- **Build**: `gcc`, `make`, libc headers — Debian/Ubuntu:
+- **Linux** with `/proc` and `/sys` (any modern distro; the battery segment
+  needs `/sys/class/power_supply/BAT*`)
+- **To build**: `gcc`, `make`, and libc headers — on Debian/Ubuntu:
   `sudo apt install gcc make libc6-dev`
-- **Runtime**: none — plain libc binary, cJSON is vendored and compiled in
-- **A Nerd Font (v3)** in the terminal for glyphs (e.g. JetBrainsMono Nerd
-  Font); without one set `CLAUDE_STATUSLINE_NERD=0` for plain-text labels
-- `make test` (optional) additionally needs `python3` and `bash` for the
-  parity harness against the Python reference
-
-- **~1.8 ms/render** (26× the Python reference), fine for `refreshInterval: 1`.
-- Green / amber ≥70% / red ≥80% for RAM, CPU, disk, context, and plan usage.
-  Battery inverted (amber ≤30%, red ≤15%, green while charging).
-  IO/NET default color, amber ≥10 MiB/s, red ≥30 MiB/s.
-- Plan usage (5h/7d windows + reset countdown) comes from `rate_limits` in the
-  stdin JSON — official data, no transcript scraping.
-- CPU/NET/IO are true rates from `/proc` deltas, persisted per-session in
-  `~/.claude/cache/statusline-state-<session_id>.dat` (atomic tmp+rename).
-- Never crashes the render: malformed stdin, missing fields, unreadable /proc,
-  corrupt state — every segment fails soft and is simply omitted.
-- Nerd Font v3 glyphs; set `CLAUDE_STATUSLINE_NERD=0` for plain-text labels.
+- **A Nerd Font (v3)** in your terminal for the glyphs (e.g. JetBrainsMono
+  Nerd Font) — or set `CLAUDE_STATUSLINE_NERD=0` for plain-text labels
+- `make test` (optional) also needs `python3` and `bash` for the parity
+  harness against the Python reference
 
 ## Build
 
@@ -47,12 +57,12 @@ make test       # byte-for-byte parity vs statusline.py reference
 
 ## Deploy
 
-`~/.claude/settings.json`:
+Point `statusLine` at the binary in `~/.claude/settings.json`:
 
 ```json
 "statusLine": {
   "type": "command",
-  "command": "/home/amr/statusline/statusline-bin",
+  "command": "/path/to/statusline/statusline-bin",
   "padding": 0,
   "refreshInterval": 1
 }
@@ -60,13 +70,13 @@ make test       # byte-for-byte parity vs statusline.py reference
 
 ## Tuning
 
-Thresholds are `#define`s in the CONFIG block at the top of `statusline.c`
-(SYS_WARN/SYS_BAD, USE_WARN/USE_BAD, RATE_WARN/RATE_BAD, RATE_MIN_INTERVAL).
-Rebuild with `make` after changing.
+All thresholds are `#define`s in the CONFIG block at the top of `statusline.c`
+(`SYS_WARN`/`SYS_BAD`, `USE_WARN`/`USE_BAD`, `RATE_WARN`/`RATE_BAD`,
+`RATE_MIN_INTERVAL`). Change, `make`, done.
 
 ## Files
 
 - `statusline.c` — the implementation
-- `statusline.py` — original Python implementation, kept as the reference spec;
-  `test/parity.sh` diffs the two byte-for-byte on generated inputs
+- `statusline.py` — the original Python implementation, kept as the reference
+  spec; `test/parity.sh` diffs the two byte-for-byte on generated inputs
 - `vendor/cJSON.{c,h}` — vendored [cJSON](https://github.com/DaveGamble/cJSON) v1.7.18 (MIT)
