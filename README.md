@@ -12,20 +12,20 @@ prints one color-coded line in ~**0.7 ms**.
 
 ## Features
 
-- **Directories** — launch and current dir, collapsed when equal, `~` substitution, middle-elision for long paths
-- **Model + context** — active model name and context-window usage %
-- **Plan usage** — 5-hour and 7-day usage with reset countdowns (`20%4h9m`), from official `rate_limits` — subscribers only
-- **Battery** — charge % with a level-ramp glyph; dedicated `󰂄` glyph while charging
-- **RAM & disk** — used % plus free space (`53%3.7G`)
-- **CPU, disk IO, network** — true rates from `/proc` deltas, tracked per session without collisions
-- **Zero disk writes** — state (~100 bytes/session) lives in tmpfs (`$XDG_RUNTIME_DIR`), vanishes at logout
-- **Color as the signal** — green fine, amber ≥70%, red ≥80%; battery inverted; IO/net amber ≥10MiB/s, red ≥30
-- **Never breaks a render** — malformed stdin, missing fields, unreadable `/proc`: segments fail soft
-- **Self-contained** — one `.c` file, nothing beyond libc; the JSON reader is ~180 lines of it
-- **Lean by measurement** — 19 syscalls, zero allocations, zero writes per steady render; profiled, not guessed
+- **Directories**: launch and current dir, `~`-shortened and elided; collapsed when equal
+- **Model + context**: active model name and context-window usage %
+- **Plan usage**: 5h and 7d windows with reset countdowns (`20%4h9m`); subscribers only
+- **Battery**: charge % with a level glyph; distinct glyph while charging
+- **RAM & disk**: used % plus free space (`53%3.7G`)
+- **CPU, disk IO, network**: true rates from `/proc` deltas, tracked per session without collisions
+- **Zero disk writes**: state (~100 bytes/session) lives in tmpfs (`$XDG_RUNTIME_DIR`), vanishes at logout
+- **Color as the signal**: green/amber/red at 70/80%; battery inverted; IO/net at 10/30MiB/s
+- **Never breaks a render**: malformed stdin, missing fields, unreadable `/proc`: segments fail soft
+- **Self-contained**: one `.c` file, nothing beyond libc; the JSON reader is ~180 lines of it
+- **Lean by measurement**: 19 syscalls, zero allocations, zero writes per render
 
 Built for a **Linux laptop** on a **Claude subscription**. Desktops, VMs, and
-API-key billing still work — the missing segments just disappear.
+API-key billing still work: the missing segments just disappear.
 
 ## Prerequisites
 
@@ -58,5 +58,5 @@ Thresholds are `#define`s in the CONFIG block atop `statusline.c`. Change, `make
 
 ## Files
 
-- `statusline.c` — the entire implementation
-- `statusline.py` — Python reference; `test/parity.sh` diffs the two byte-for-byte
+- `statusline.c`: the entire implementation
+- `statusline.py`: Python reference; `test/parity.sh` diffs the two byte-for-byte
