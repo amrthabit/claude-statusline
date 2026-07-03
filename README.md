@@ -10,6 +10,20 @@ prints one color-coded line in ~**0.7 ms**.
  user@host:launch › current │ Model effort ctx%size 5h%reset 7d%reset │ BAT RAM CPU°temp DISK IO NET date session#
 ```
 
+## Why
+
+I live in Claude Code: hours a day, fullscreen, so its terminal is the screen I
+actually look at. I got tired of hand-rolling a custom statusline on every
+machine I install Claude on, so I wanted one I can drop into any installation and
+get the same readout every time.
+
+I'm a Linux systems admin at heart, and if the terminal is going to own my screen
+all day it may as well tell me what the box is doing. So this packs the system
+vitals (CPU, RAM, disk, temperature, disk IO, network) next to the Claude session
+info (model, context, plan usage), dense and quick to read. Color does the
+talking: green is fine, amber and red mean look closer. Good at-a-glance info on
+everything, in one line, worth keeping on screen for hours.
+
 ## Features
 
 - **Directories**: `user@host:` prefix, launch and current dir, `~`-shortened; collapsed when equal
