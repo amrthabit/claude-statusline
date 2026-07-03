@@ -16,7 +16,10 @@ statusline-bin: statusline.c
 test: statusline-bin
 	bash test/parity.sh
 
+preview:
+	bash scripts/preview.sh
+
 clean:
 	rm -f statusline-bin
 
-.PHONY: test clean
+.PHONY: test preview clean

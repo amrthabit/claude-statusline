@@ -611,7 +611,7 @@ def main():
                         c(G["net"], DIM) + ICON_SEP +
                         c(f"↑{human(txb)}", rate_color(txb)))
 
-    sysparts.append(c(time.strftime("%b %-d %H:%M"), DIM) + " " +
+    sysparts.append(c(time.strftime("%-d%b%H:%M"), DIM) + " " +
                     c(G["sessions"], DIM) + ICON_SEP +
                     c(f"{sessions}", DIM))
 

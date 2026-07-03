@@ -57,7 +57,25 @@ Then point `statusLine` at the binary in `~/.claude/settings.json`:
 
 Thresholds are `#define`s in the CONFIG block atop `statusline.c`. Change, `make`, done.
 
+## Local preview + profiling
+
+No cloud CI: `make preview` (or `scripts/preview.sh`) builds, runs the parity
+suite, prints syscall/timing profiling, and regenerates two local artifacts
+mocked inside the bit of Claude Code's own UI that surrounds the statusline -
+`docs/statusline-preview.txt` (the real ANSI output; `cat` it in a terminal
+with the same Nerd Font, or paste it directly) and `docs/statusline-preview.png`
+(rendered with [VHS](https://github.com/charmbracelet/vhs), since GitHub
+won't render ANSI in a code block; needs `vhs` on `PATH` plus `ttyd` and
+`ffmpeg` - `sudo apt install ttyd ffmpeg`).
+
+Run it automatically before every commit that touches the implementation:
+
+```
+git config core.hooksPath githooks
+```
+
 ## Files
 
 - `statusline.c`: the entire implementation
 - `statusline.py`: Python reference; `test/parity.sh` diffs the two byte-for-byte
+- `scripts/preview.sh`, `githooks/pre-commit`: local preview + profiling, no CI service

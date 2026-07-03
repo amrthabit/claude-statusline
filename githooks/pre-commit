@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Regenerates docs/statusline-preview.{txt,png} and prints profiling before
+# any commit that touches the implementation - fully local, no CI service.
+# Enable once with: git config core.hooksPath githooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if ! git diff --cached --name-only | grep -qE '^(statusline\.c|statusline\.py|Makefile|scripts/preview-frame\.sh|docs/preview\.tape)$'; then
+    exit 0
+fi
+
+scripts/preview.sh
+git add docs/statusline-preview.txt docs/statusline-preview.png
