@@ -24,6 +24,9 @@ about **1.8 ms** — cheap enough to refresh every second.
 - **CPU, disk IO, network** — true rates computed from `/proc` deltas between
   refreshes, persisted per session (concurrent Claude sessions don't corrupt
   each other's readings)
+- **Zero disk writes** — the only state (one ~100-byte counter snapshot per
+  session) lives in RAM-backed tmpfs (`$XDG_RUNTIME_DIR`, falling back to
+  `/dev/shm`) and vanishes at logout; nothing ever touches the SSD
 - **Color as the signal** — green when fine, amber at ≥70%, red at ≥80% for
   percentages; battery inverted (amber ≤30%, red ≤15%); IO/net stay uncolored
   until they cross 10 MiB/s (amber) or 30 MiB/s (red)
