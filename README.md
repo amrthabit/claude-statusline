@@ -24,6 +24,7 @@ prints one color-coded line in ~**0.7 ms**.
 - **Never breaks a render**: malformed stdin, missing fields, unreadable `/proc`: segments fail soft
 - **Self-contained**: one `.c` file, nothing beyond libc; the JSON reader is ~180 lines of it
 - **Lean by measurement**: ~19-27 syscalls depending on enabled segments, zero allocations, zero writes at steady state
+- **Stable width**: the fields that change often are held to a fixed width so a 1s refresh doesn't reflow the line; see [docs/width-stability.md](docs/width-stability.md) for the per-field reasoning
 
 Built for a **Linux laptop** on a **Claude subscription**. Desktops, VMs, and
 API-key billing still work: the missing segments just disappear.
