@@ -19,7 +19,7 @@ prints one color-coded line in ~**0.7 ms**.
 - **RAM & disk** — used % plus free space (`53%3.7G`)
 - **CPU, disk IO, network** — true rates from `/proc` deltas, tracked per session without collisions
 - **Zero disk writes** — state (~100 bytes/session) lives in tmpfs (`$XDG_RUNTIME_DIR`), vanishes at logout
-- **Color as the signal** — green fine, amber ≥70%, red ≥80%; battery inverted; IO/net amber ≥10 MiB/s, red ≥30
+- **Color as the signal** — green fine, amber ≥70%, red ≥80%; battery inverted; IO/net amber ≥10MiB/s, red ≥30
 - **Never breaks a render** — malformed stdin, missing fields, unreadable `/proc`: segments fail soft
 - **Self-contained** — one `.c` file, nothing beyond libc; the JSON reader is ~180 lines of it
 - **Lean by measurement** — 19 syscalls, zero allocations, zero writes per steady render; profiled, not guessed
