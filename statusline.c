@@ -105,6 +105,13 @@ static void sb_raw(SB *s, const char *fmt, ...) {
     }
 }
 
+static void sb_cat(SB *s, const char *src, size_t n) {   /* raw bytes, no fmt */
+    if (n > sizeof s->buf - 1 - s->len) n = sizeof s->buf - 1 - s->len;
+    memcpy(s->buf + s->len, src, n);
+    s->len += n;
+    s->buf[s->len] = 0;
+}
+
 /* Python c(s, color): color + text + RESET (reset always appended, even for
  * the empty "standard color" — byte parity with the reference).             */
 static void sb_c(SB *s, const char *color, const char *fmt, ...) {
@@ -404,51 +411,93 @@ static bool jnum(const char *v, double *out) {
 }
 
 /* --------------------------------------------------------- /proc, /sys ---- */
-static bool read_battery(int *pct, bool *charging) {
-    char best[64] = "", path[320], line[64];   /* 320 > dir prefix + d_name(255) + suffix */
-    DIR *d = opendir("/sys/class/power_supply");
-    if (!d) return false;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (strncmp(e->d_name, "BAT", 3) != 0 || strlen(e->d_name) >= sizeof best)
-            continue;
-        snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", e->d_name);
-        if (access(path, R_OK) != 0) continue;
-        if (!best[0] || strcmp(e->d_name, best) < 0)
-            snprintf(best, sizeof best, "%s", e->d_name);
+/* Raw-syscall file readers: open/read/close into a caller buffer, no stdio.
+ * Each stdio FILE costs a malloc (mmap/brk churn + page faults) plus extra
+ * fstat/lseek syscalls per stream; a render opens ~10 files, so it adds up. */
+static int rdfile(const char *path, char *buf, size_t cap) {  /* whole file */
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    size_t len = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf + len, cap - 1 - len);
+        if (n <= 0) break;
+        len += (size_t)n;
+        if (len >= cap - 1) break;
     }
-    closedir(d);
-    if (!best[0]) return false;
-    snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", best);
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
-    bool ok = fscanf(f, "%d", pct) == 1;
-    fclose(f);
-    if (!ok) return false;
-    *charging = false;
-    snprintf(path, sizeof path, "/sys/class/power_supply/%s/status", best);
-    f = fopen(path, "r");
-    if (f) {
-        if (fgets(line, sizeof line, f)) {
-            line[strcspn(line, "\n")] = 0;
-            *charging = !strcmp(line, "Charging") || !strcmp(line, "Full");
+    close(fd);
+    buf[len] = 0;
+    return (int)len;
+}
+static int rdfirst(const char *path, char *buf, size_t cap) { /* one read() */
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, cap - 1);
+    close(fd);
+    if (n < 0) n = 0;
+    buf[n] = 0;
+    return (int)n;
+}
+static const char *next_line(const char *p) {
+    p = strchr(p, '\n');
+    return p ? p + 1 : NULL;
+}
+
+/* Battery, with the sysfs name memoized in rate state: the warm path opens
+ * capacity/status directly instead of re-scanning the power_supply dir every
+ * render (getdents64 x2 + opens). bat: "" = unknown -> scan; "-" = scanned,
+ * no battery (skip; a hotplugged battery shows after the state resets).
+ * Scan picks the lexicographically first BAT* without probing readability -
+ * multi-battery machines with an unreadable first battery would need the
+ * old probe, single-battery laptops never do.                               */
+struct State;
+static bool read_battery(char *bat, size_t batcap, int *pct, bool *charging) {
+    char path[352], buf[64];
+    if (!strcmp(bat, "-")) return false;
+    if (bat[0]) {
+        snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", bat);
+        if (rdfirst(path, buf, sizeof buf) > 0) goto have;
+        bat[0] = 0;                               /* stale name -> rescan */
+    }
+    {
+        char best[32] = "";
+        DIR *d = opendir("/sys/class/power_supply");
+        if (!d) return false;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, "BAT", 3) != 0 ||
+                strlen(e->d_name) >= sizeof best)
+                continue;
+            if (!best[0] || strcmp(e->d_name, best) < 0)
+                snprintf(best, sizeof best, "%s", e->d_name);
         }
-        fclose(f);
+        closedir(d);
+        if (!best[0]) { snprintf(bat, batcap, "-"); return false; }
+        snprintf(bat, batcap, "%s", best);
+        snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", bat);
+        if (rdfirst(path, buf, sizeof buf) <= 0) return false;
+    }
+have:;
+    char *end;
+    long v = strtol(buf, &end, 10);
+    if (end == buf) return false;
+    *pct = (int)v;
+    *charging = false;
+    snprintf(path, sizeof path, "/sys/class/power_supply/%s/status", bat);
+    if (rdfirst(path, buf, sizeof buf) > 0) {
+        buf[strcspn(buf, "\n")] = 0;
+        *charging = !strcmp(buf, "Charging") || !strcmp(buf, "Full");
     }
     return true;
 }
 
 static bool read_mem(double *used_pct, double *avail_bytes) {
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) return false;
+    char buf[4096];   /* whole meminfo fits; needed lines are at the top */
+    if (rdfirst("/proc/meminfo", buf, sizeof buf) <= 0) return false;
     long long total = 0, avail = 0;
-    char line[256];
-    while (fgets(line, sizeof line, f) && (!total || !avail)) {
-        long long v;
-        if (sscanf(line, "MemTotal: %lld", &v) == 1)          total = v * 1024;
-        else if (sscanf(line, "MemAvailable: %lld", &v) == 1) avail = v * 1024;
+    for (const char *p = buf; p && (!total || !avail); p = next_line(p)) {
+        if (!strncmp(p, "MemTotal:", 9))           total = strtoll(p + 9, NULL, 10) * 1024;
+        else if (!strncmp(p, "MemAvailable:", 13)) avail = strtoll(p + 13, NULL, 10) * 1024;
     }
-    fclose(f);
     if (!total) return false;
     *used_pct = (double)(total - avail) / (double)total * 100.0;
     *avail_bytes = (double)avail;
@@ -456,14 +505,11 @@ static bool read_mem(double *used_pct, double *avail_bytes) {
 }
 
 static bool read_cpu_snapshot(long long *total, long long *idle) {
-    FILE *f = fopen("/proc/stat", "r");
-    if (!f) return false;
-    char line[512];
-    bool ok = fgets(line, sizeof line, f) != NULL;
-    fclose(f);
-    if (!ok || strncmp(line, "cpu", 3) != 0) return false;
+    char buf[1024];   /* only need line 1; strtoll stops at "\ncpu0" anyway */
+    if (rdfirst("/proc/stat", buf, sizeof buf) <= 0) return false;
+    if (strncmp(buf, "cpu", 3) != 0) return false;
     long long vals[16]; int n = 0;
-    for (char *p = line + 3; n < 16; ) {
+    for (const char *p = buf + 3; n < 16; ) {
         char *end;
         long long v = strtoll(p, &end, 10);
         if (end == p) break;
@@ -483,29 +529,32 @@ static bool skip_iface(const char *name) {
 }
 
 static bool read_net_snapshot(long long *rx, long long *tx) {
-    FILE *f = fopen("/proc/net/dev", "r");
-    if (!f) return false;
-    char line[512];
+    char buf[16384];   /* fits dozens of interfaces */
+    if (rdfile("/proc/net/dev", buf, sizeof buf) <= 0) return false;
     int lineno = 0;
     *rx = *tx = 0;
-    while (fgets(line, sizeof line, f)) {
+    for (const char *p = buf; p; p = next_line(p)) {
         if (++lineno <= 2) continue;
-        char *colon = strchr(line, ':');
-        if (!colon) continue;
-        *colon = 0;
-        char *iface = line;
+        const char *nl = strchr(p, '\n');
+        const char *colon = strchr(p, ':');
+        if (!colon || (nl && colon > nl)) continue;
+        const char *iface = p;
         while (*iface == ' ') iface++;
-        if (skip_iface(iface)) continue;
+        char name[32];
+        size_t ilen = (size_t)(colon - iface);
+        if (ilen == 0 || ilen >= sizeof name) continue;
+        memcpy(name, iface, ilen);
+        name[ilen] = 0;
+        if (skip_iface(name)) continue;
         long long fields[9]; int n = 0;
-        for (char *p = colon + 1; n < 9; ) {
+        for (const char *q = colon + 1; n < 9; ) {
             char *end;
-            long long v = strtoll(p, &end, 10);
-            if (end == p) break;
-            fields[n++] = v; p = end;
+            long long v = strtoll(q, &end, 10);
+            if (end == q) break;
+            fields[n++] = v; q = end;
         }
         if (n >= 9) { *rx += fields[0]; *tx += fields[8]; }
     }
-    fclose(f);
     return true;
 }
 
@@ -535,22 +584,37 @@ static bool is_whole_disk(const char *name) {
 }
 
 static bool read_io_snapshot(long long *rd, long long *wr) {
-    FILE *f = fopen("/proc/diskstats", "r");
-    if (!f) return false;
-    char line[512];
+    char buf[16384];
+    if (rdfile("/proc/diskstats", buf, sizeof buf) <= 0) return false;
     *rd = *wr = 0;
-    while (fgets(line, sizeof line, f)) {
+    /* per line: major minor name reads merged sectors_rd ms writes merged
+     * sectors_wr ... - we need sectors_rd (3rd after name) and sectors_wr
+     * (7th after name)                                                      */
+    for (const char *p = buf; p; p = next_line(p)) {
+        char *end;
+        const char *q = p;
+        strtoll(q, &end, 10); if (end == q) continue; q = end;   /* major */
+        strtoll(q, &end, 10); if (end == q) continue; q = end;   /* minor */
+        while (*q == ' ') q++;
+        const char *ns = q;
+        while (*q && *q != ' ' && *q != '\n') q++;
         char name[64];
-        long long fld[10];
-        /* major minor name reads merged sectors_rd ms writes merged sectors_wr */
-        int n = sscanf(line, "%lld %lld %63s %lld %lld %lld %lld %lld %lld %lld",
-                       &fld[0], &fld[1], name,
-                       &fld[3], &fld[4], &fld[5], &fld[6], &fld[7], &fld[8], &fld[9]);
-        if (n < 10 || !is_whole_disk(name)) continue;
-        *rd += fld[5] * 512;
-        *wr += fld[9] * 512;
+        size_t nlen = (size_t)(q - ns);
+        if (nlen == 0 || nlen >= sizeof name) continue;
+        memcpy(name, ns, nlen);
+        name[nlen] = 0;
+        if (!is_whole_disk(name)) continue;
+        long long f[7];
+        bool ok = true;
+        for (int i = 0; i < 7; i++) {
+            f[i] = strtoll(q, &end, 10);
+            if (end == q) { ok = false; break; }
+            q = end;
+        }
+        if (!ok) continue;
+        *rd += f[2] * 512;
+        *wr += f[6] * 512;
     }
-    fclose(f);
     return true;
 }
 
@@ -568,12 +632,10 @@ static bool read_disk(double *pct, double *avail_bytes) {
 }
 
 static double loadavg_pct(void) {
-    FILE *f = fopen("/proc/loadavg", "r");
-    if (!f) return NAN;
-    double one;
-    bool ok = fscanf(f, "%lf", &one) == 1;
-    fclose(f);
-    if (!ok) return NAN;
+    char buf[128], *end;
+    if (rdfirst("/proc/loadavg", buf, sizeof buf) <= 0) return NAN;
+    double one = strtod(buf, &end);
+    if (end == buf) return NAN;
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 1;
     return one / (double)n * 100.0;
@@ -582,13 +644,15 @@ static double loadavg_pct(void) {
 /* ------------------------------------------------------------ rate state -- */
 /* Per-session state so concurrent Claude sessions don't stomp each other's
  * delta snapshots. Flat text, one line:
- *   ts  hc ct ci  hn rx tx  hi ior iow  cpu rxr txr iorr iowr
- * (h* = snapshot-present flags; rates are doubles, "nan" = absent)          */
-typedef struct {
+ *   ts  hc ct ci  hn rx tx  hi ior iow  cpu rxr txr iorr iowr  bat
+ * (h* = snapshot-present flags; rates are doubles, "nan" = absent; bat is
+ * the memoized battery sysfs name, "-" = none found)                        */
+typedef struct State {
     double ts;
     bool has_cpu, has_net, has_io;
     long long ct, ci, rx, tx, ior, iow;
     double r_cpu, r_rx, r_tx, r_ior, r_iow;   /* cached rates, NAN = absent */
+    char bat[32];
 } State;
 
 static void state_init(State *s) {
@@ -633,101 +697,118 @@ static void state_file(const char *root, char *dst, size_t cap) {
 
 static void state_load(const char *path, State *s) {
     state_init(s);
-    FILE *f = fopen(path, "r");
-    if (!f) return;
+    char buf[512];
+    if (rdfirst(path, buf, sizeof buf) <= 0) return;
     State t;
     state_init(&t);
-    int hc, hn, hi;
-    int n = fscanf(f, "%lf %d %lld %lld %d %lld %lld %d %lld %lld %lf %lf %lf %lf %lf",
-                   &t.ts, &hc, &t.ct, &t.ci, &hn, &t.rx, &t.tx, &hi, &t.ior, &t.iow,
-                   &t.r_cpu, &t.r_rx, &t.r_tx, &t.r_ior, &t.r_iow);
-    fclose(f);
-    if (n != 15) return;             /* corrupt/old format -> clean re-seed */
-    t.has_cpu = hc; t.has_net = hn; t.has_io = hi;
+    const char *p = buf;
+    char *e;
+    t.ts = strtod(p, &e); if (e == p) return; p = e;
+    long long v[9];                        /* hc ct ci  hn rx tx  hi ior iow */
+    for (int i = 0; i < 9; i++) {
+        v[i] = strtoll(p, &e, 10); if (e == p) return; p = e;
+    }
+    double *r[5] = {&t.r_cpu, &t.r_rx, &t.r_tx, &t.r_ior, &t.r_iow};
+    for (int i = 0; i < 5; i++) {
+        *r[i] = strtod(p, &e); if (e == p) return; p = e;
+    }
+    t.has_cpu = v[0]; t.ct  = v[1]; t.ci  = v[2];
+    t.has_net = v[3]; t.rx  = v[4]; t.tx  = v[5];
+    t.has_io  = v[6]; t.ior = v[7]; t.iow = v[8];
+    while (*p == ' ' || *p == '\n') p++;   /* optional battery-name token */
+    size_t bl = 0;
+    while (p[bl] && p[bl] != ' ' && p[bl] != '\n' && bl < sizeof t.bat - 1) bl++;
+    if (bl) { memcpy(t.bat, p, bl); t.bat[bl] = 0; }
     *s = t;
 }
 
 static void state_save(const char *path, const State *s) {
     char tmp[640];   /* path buffer (600) + ".tmp" */
+    char buf[512];
+    int len = snprintf(buf, sizeof buf,
+            "%.6f %d %lld %lld %d %lld %lld %d %lld %lld %.17g %.17g %.17g %.17g %.17g %s\n",
+            s->ts, s->has_cpu, s->ct, s->ci, s->has_net, s->rx, s->tx,
+            s->has_io, s->ior, s->iow,
+            s->r_cpu, s->r_rx, s->r_tx, s->r_ior, s->r_iow,
+            s->bat[0] ? s->bat : "-");
+    if (len <= 0 || (size_t)len >= sizeof buf) return;
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     /* O_EXCL: never follow a pre-existing symlink (matters for /dev/shm) */
     int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600);
     if (fd < 0) { unlink(tmp); fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600); }
     if (fd < 0) return;
-    FILE *f = fdopen(fd, "w");
-    if (!f) { close(fd); return; }
-    fprintf(f, "%.6f %d %lld %lld %d %lld %lld %d %lld %lld %.17g %.17g %.17g %.17g %.17g\n",
-            s->ts, s->has_cpu, s->ct, s->ci, s->has_net, s->rx, s->tx,
-            s->has_io, s->ior, s->iow,
-            s->r_cpu, s->r_rx, s->r_tx, s->r_ior, s->r_iow);
-    if (fclose(f) == 0) rename(tmp, path);
+    bool ok = write(fd, buf, (size_t)len) == len;
+    close(fd);
+    if (ok) rename(tmp, path);
+    else unlink(tmp);
 }
 
-/* Compute cpu%, net rx/tx B/s, io r/w B/s from deltas vs saved state.
- * Reuses cached rates when the last sample is younger than RATE_MIN_INTERVAL. */
-static void rate_metrics(const char *path, State *out_rates) {
-    State st;
-    state_load(path, &st);
+/* Compute cpu%, net rx/tx B/s, io r/w B/s from deltas vs the prior snapshot,
+ * updating *st in place. Returns true when it recomputed (state needs
+ * saving), false on the reuse path (cached rates younger than
+ * RATE_MIN_INTERVAL - no snapshot reads, no write).                         */
+static bool rate_metrics(State *st) {
     double now = now_monotonicish();
-    double dt = now - st.ts;
+    double dt = now - st->ts;
 
-    long long ct = 0, ci = 0, rx = 0, tx = 0, ior = 0, iow = 0;
     /* Reuse check FIRST: Claude re-renders on events (keystrokes, tool calls),
      * not just the refresh timer. During bursts the reuse path hits and the
      * three snapshot reads below would be pure waste.                       */
-    bool any_cached = !isnan(st.r_cpu) || !isnan(st.r_rx) || !isnan(st.r_tx) ||
-                      !isnan(st.r_ior) || !isnan(st.r_iow);
-    if (any_cached && dt >= 0 && dt < RATE_MIN_INTERVAL) {
-        *out_rates = st;             /* reuse; leave file untouched */
-        return;
-    }
+    bool any_cached = !isnan(st->r_cpu) || !isnan(st->r_rx) || !isnan(st->r_tx) ||
+                      !isnan(st->r_ior) || !isnan(st->r_iow);
+    if (any_cached && dt >= 0 && dt < RATE_MIN_INTERVAL)
+        return false;
 
+    long long ct = 0, ci = 0, rx = 0, tx = 0, ior = 0, iow = 0;
     bool has_cpu = read_cpu_snapshot(&ct, &ci);
     bool has_net = read_net_snapshot(&rx, &tx);
     bool has_io  = read_io_snapshot(&ior, &iow);
 
-    State ns = st;                   /* rates carry forward, never blank out */
-    if (has_cpu && st.has_cpu && dt > 0) {
-        long long dtot = ct - st.ct, didle = ci - st.ci;
+    State old = *st;                 /* rates carry forward, never blank out */
+    if (has_cpu && old.has_cpu && dt > 0) {
+        long long dtot = ct - old.ct, didle = ci - old.ci;
         if (dtot > 0) {
             double v = (1.0 - (double)didle / (double)dtot) * 100.0;
-            ns.r_cpu = v < 0 ? 0 : v > 100 ? 100 : v;
+            st->r_cpu = v < 0 ? 0 : v > 100 ? 100 : v;
         }
     }
-    if (has_net && st.has_net && dt > 0) {
-        ns.r_rx = fmax(0.0, (double)(rx - st.rx) / dt);
-        ns.r_tx = fmax(0.0, (double)(tx - st.tx) / dt);
+    if (has_net && old.has_net && dt > 0) {
+        st->r_rx = fmax(0.0, (double)(rx - old.rx) / dt);
+        st->r_tx = fmax(0.0, (double)(tx - old.tx) / dt);
     }
-    if (has_io && st.has_io && dt > 0) {
-        ns.r_ior = fmax(0.0, (double)(ior - st.ior) / dt);
-        ns.r_iow = fmax(0.0, (double)(iow - st.iow) / dt);
+    if (has_io && old.has_io && dt > 0) {
+        st->r_ior = fmax(0.0, (double)(ior - old.ior) / dt);
+        st->r_iow = fmax(0.0, (double)(iow - old.iow) / dt);
     }
-    ns.ts = now;
-    if (has_cpu) { ns.has_cpu = true; ns.ct = ct; ns.ci = ci; }
-    if (has_net) { ns.has_net = true; ns.rx = rx; ns.tx = tx; }
-    if (has_io)  { ns.has_io  = true; ns.ior = ior; ns.iow = iow; }
-    state_save(path, &ns);
-    *out_rates = ns;
+    st->ts = now;
+    if (has_cpu) { st->has_cpu = true; st->ct = ct; st->ci = ci; }
+    if (has_net) { st->has_net = true; st->rx = rx; st->tx = tx; }
+    if (has_io)  { st->has_io  = true; st->ior = ior; st->iow = iow; }
+    return true;
 }
 
 /* ------------------------------------------------------------------ main -- */
-static char *read_stdin(void) {
-    size_t cap = 65536, len = 0;
-    char *buf = malloc(cap);
-    if (!buf) return NULL;
-    size_t n;
-    while ((n = fread(buf + len, 1, cap - len - 1, stdin)) > 0) {
-        len += n;
-        if (len + 1 >= cap) {
-            if (cap >= 1 << 20) break;      /* 1MB sanity cap */
-            cap *= 2;
-            char *nb = realloc(buf, cap);
-            if (!nb) break;
-            buf = nb;
+/* Static stdin buffer: .bss pages fault in only as data touches them, and
+ * there's no malloc/mmap churn. After the first read() we check whether we
+ * already hold a complete JSON document (Claude writes it in one go) and
+ * skip the EOF-confirming second read.                                      */
+static char RAW[262144];
+static size_t read_stdin_raw(void) {
+    size_t len = 0;
+    for (;;) {
+        ssize_t n = read(0, RAW + len, sizeof RAW - 1 - len);
+        if (n <= 0) break;
+        len += (size_t)n;
+        if (len >= sizeof RAW - 1) break;
+        RAW[len] = 0;
+        const char *p = jws(RAW);
+        if (*p == '{') {
+            const char *end = jskip(p, 0);
+            if (end && *jws(end) == 0) break;     /* complete doc - done */
         }
     }
-    buf[len] = 0;
-    return buf;
+    RAW[len] = 0;
+    return len;
 }
 
 /* usage segment: N%<reset>, % colored by use_color, reset dim, no space. */
@@ -754,11 +835,11 @@ int main(void) {
     NERD = !(nerd_env && !strcmp(nerd_env, "0"));
     G = NERD ? &G_NERD : &G_PLAIN;
 
-    char *raw = read_stdin();
+    read_stdin_raw();
     /* Accept the document only if it parses completely (like json.loads). */
     const char *root = NULL;
-    if (raw) {
-        const char *p = jws(raw);
+    {
+        const char *p = jws(RAW);
         if (*p == '{') {
             const char *end = jskip(p, 0);
             if (end && *jws(end) == 0) root = p;
@@ -833,13 +914,16 @@ int main(void) {
     char sfile[600];
     state_file(root, sfile, sizeof sfile);
     State rates;
-    rate_metrics(sfile, &rates);
+    state_load(sfile, &rates);
+    bool recomputed = rate_metrics(&rates);
+    char oldbat[32];
+    memcpy(oldbat, rates.bat, sizeof oldbat);
 
     bool first = true;
 #define SYS_SEP() do { if (!first) sb_raw(&sys_, " "); first = false; } while (0)
 
     int bpct; bool bchg;
-    if (read_battery(&bpct, &bchg)) {
+    if (read_battery(rates.bat, sizeof rates.bat, &bpct, &bchg)) {
         SYS_SEP();
         const char *bc = bat_color(bpct, bchg);
         sb_c(&sys_, bc, "%s", bat_glyph(bpct));
@@ -904,15 +988,27 @@ int main(void) {
         sb_c(&sys_, rate_color(tx), "%s%s", u8"↑", ht);
     }
 
-    /* --- assemble: segments joined by dim │ --- */
-    fputs(dirs.buf, stdout);
-    fputs(" " DIM u8"│" RST " ", stdout);
-    fputs(mid.buf, stdout);
-    if (sys_.len) {
-        fputs(" " DIM u8"│" RST " ", stdout);
-        fputs(sys_.buf, stdout);
-    }
+    /* Persist state when rates were recomputed or the battery name was just
+     * (re)discovered; the burst reuse path writes nothing.                  */
+    if (recomputed || memcmp(oldbat, rates.bat, sizeof oldbat) != 0)
+        state_save(sfile, &rates);
 
-    free(raw);
+    /* --- assemble and emit in a single write(): segments joined by dim │,
+     * no stdout stdio (avoids its lazy-init ioctl/fcntl and writev)         */
+    static const char SEG_SEP[] = " " DIM u8"│" RST " ";
+    SB out = {0};
+    sb_cat(&out, dirs.buf, dirs.len);
+    sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
+    sb_cat(&out, mid.buf, mid.len);
+    if (sys_.len) {
+        sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
+        sb_cat(&out, sys_.buf, sys_.len);
+    }
+    size_t off = 0;
+    while (off < out.len) {
+        ssize_t n = write(1, out.buf + off, out.len - off);
+        if (n <= 0) break;
+        off += (size_t)n;
+    }
     return 0;
 }
