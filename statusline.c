@@ -6,8 +6,11 @@
  *
  *   Segments:  launch>current dir | model ctx% 5h 7d | BAT RAM CPU DISK IO NET
  *
- * Build:   gcc -O2 -Wall -Wextra -std=c11 -o statusline-bin statusline.c vendor/cJSON.c -lm
- * (or just `make`)
+ * Single self-contained file - no dependencies beyond libc (JSON reader
+ * included below).
+ *
+ * Build:   cc -O2 -Wall -Wextra -std=c11 -static -o statusline-bin statusline.c -lm
+ * (or just `make`, which prefers musl-gcc for its ~40x faster process init)
  *
  * Thresholds and behavior knobs live in the CONFIG block below.
  */
@@ -23,7 +26,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/statvfs.h>
-#include "vendor/cJSON.h"
 
 /* ---------------------------------------------------------------- CONFIG -- */
 /* Color thresholds (percent). >=WARN -> amber, >=BAD -> red, else green.    */
@@ -211,20 +213,25 @@ static void fmt_delta(double seconds, char *dst, size_t cap) {
     else        snprintf(dst, cap, "<1m");
 }
 
+/* JSON reader (defined below) */
+static const char *jget(const char *obj, const char *key);
+static bool jstr(const char *v, char *dst, size_t cap);
+static bool jnum(const char *v, double *out);
+
 /* resets_at -> seconds until reset. Epoch (s or ms, number or numeric
- * string) or ISO8601 (Z / +00:00 assumed UTC). NAN when unparseable.        */
-static double parse_reset(const cJSON *v) {
-    if (!v) return NAN;
+ * string) or ISO8601 (Z / +00:00 assumed UTC). NAN when unparseable.
+ * Takes a raw JSON value pointer (jget result).                             */
+static double parse_reset(const char *v) {
     double now = (double)time(NULL);
-    if (cJSON_IsNumber(v)) {
-        double n = v->valuedouble;
+    double n;
+    if (jnum(v, &n)) {
         if (n > 1e12) n /= 1000.0;
         return n - now;
     }
-    if (!cJSON_IsString(v) || !v->valuestring) return NAN;
-    const char *sv = v->valuestring;
+    char sv[64];
+    if (!jstr(v, sv, sizeof sv)) return NAN;
     char *end = NULL;
-    double n = strtod(sv, &end);
+    n = strtod(sv, &end);
     if (end && end != sv && *end == 0) {
         if (n > 1e12) n /= 1000.0;
         return n - now;
@@ -242,13 +249,158 @@ static double parse_reset(const cJSON *v) {
     return (double)timegm(&tm) + frac - off - now;
 }
 
-/* -------------------------------------------------------------- json dig -- */
-static const cJSON *jget(const cJSON *o, const char *k) {
-    return o ? cJSON_GetObjectItemCaseSensitive(o, k) : NULL;
+/* ------------------------------------------------------------------ json -- */
+/* Minimal zero-allocation JSON reader. A "value" is a const char* pointing
+ * at the value's first byte inside the raw stdin buffer; NULL means absent.
+ * We only ever extract strings and numbers at known object paths, but the
+ * skipper understands the full grammar (arrays, escapes, nesting) so unknown
+ * fields never derail us. The whole document is validated first, so partial
+ * garbage degrades to "no data" exactly like Python's json.loads.           */
+#define JSON_MAX_DEPTH 64
+
+static const char *jws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
 }
-static const char *jstr(const cJSON *v) {
-    return (v && cJSON_IsString(v) && v->valuestring && v->valuestring[0])
-        ? v->valuestring : NULL;
+
+static const char *jskip_str(const char *p) {   /* p at opening quote */
+    p++;
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) p += 2;
+        else p++;
+    }
+    return *p == '"' ? p + 1 : NULL;
+}
+
+/* Skip one value of any type; returns pointer past it, or NULL on error. */
+static const char *jskip(const char *p, int depth) {
+    if (!p || depth > JSON_MAX_DEPTH) return NULL;
+    p = jws(p);
+    if (*p == '"') return jskip_str(p);
+    if (*p == '{' || *p == '[') {
+        char close = *p == '{' ? '}' : ']';
+        p = jws(p + 1);
+        if (*p == close) return p + 1;
+        for (;;) {
+            if (close == '}') {                 /* "key": */
+                if (*p != '"') return NULL;
+                p = jskip_str(p);
+                if (!p) return NULL;
+                p = jws(p);
+                if (*p != ':') return NULL;
+                p = jws(p + 1);
+            }
+            p = jskip(p, depth + 1);
+            if (!p) return NULL;
+            p = jws(p);
+            if (*p == ',') { p = jws(p + 1); continue; }
+            if (*p == close) return p + 1;
+            return NULL;
+        }
+    }
+    if (!strncmp(p, "true", 4))  return p + 4;
+    if (!strncmp(p, "false", 5)) return p + 5;
+    if (!strncmp(p, "null", 4))  return p + 4;
+    if (*p == '-' || (*p >= '0' && *p <= '9')) {
+        p++;
+        while (*p && strchr("0123456789+-.eE", *p)) p++;
+        return p;
+    }
+    return NULL;
+}
+
+/* Find `key` in the object at `obj`; -> value pointer or NULL. First match
+ * wins (duplicate keys don't occur in this input). Keys compare raw, which
+ * is exact for the plain-ASCII keys we look up.                             */
+static const char *jget(const char *obj, const char *key) {
+    if (!obj) return NULL;
+    const char *p = jws(obj);
+    if (*p != '{') return NULL;
+    p = jws(p + 1);
+    size_t klen = strlen(key);
+    while (*p == '"') {
+        const char *kstart = p + 1;
+        const char *kend = jskip_str(p);
+        if (!kend) return NULL;
+        bool match = (size_t)(kend - 1 - kstart) == klen &&
+                     !memcmp(kstart, key, klen);
+        p = jws(kend);
+        if (*p != ':') return NULL;
+        p = jws(p + 1);
+        if (match) return p;
+        p = jskip(p, 0);
+        if (!p) return NULL;
+        p = jws(p);
+        if (*p != ',') return NULL;
+        p = jws(p + 1);
+    }
+    return NULL;
+}
+
+/* Decode a JSON string value into dst (handles \escapes, \uXXXX incl.
+ * surrogate pairs -> UTF-8). False if absent, not a string, or too long.    */
+static bool jstr(const char *v, char *dst, size_t cap) {
+    if (!v) return false;
+    v = jws(v);
+    if (*v != '"') return false;
+    v++;
+    size_t j = 0;
+    while (*v && *v != '"') {
+        if (j + 5 >= cap) return false;
+        if (*v != '\\') { dst[j++] = *v++; continue; }
+        v++;
+        switch (*v) {
+            case '"':  dst[j++] = '"';  v++; break;
+            case '\\': dst[j++] = '\\'; v++; break;
+            case '/':  dst[j++] = '/';  v++; break;
+            case 'b':  dst[j++] = '\b'; v++; break;
+            case 'f':  dst[j++] = '\f'; v++; break;
+            case 'n':  dst[j++] = '\n'; v++; break;
+            case 'r':  dst[j++] = '\r'; v++; break;
+            case 't':  dst[j++] = '\t'; v++; break;
+            case 'u': {
+                unsigned cp;
+                if (sscanf(v + 1, "%4x", &cp) != 1) return false;
+                v += 5;
+                if (cp >= 0xD800 && cp <= 0xDBFF && v[0] == '\\' && v[1] == 'u') {
+                    unsigned lo;
+                    if (sscanf(v + 2, "%4x", &lo) == 1 &&
+                        lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        v += 6;
+                    }
+                }
+                if (cp < 0x80) dst[j++] = (char)cp;
+                else if (cp < 0x800) {
+                    dst[j++] = (char)(0xC0 | cp >> 6);
+                    dst[j++] = (char)(0x80 | (cp & 0x3F));
+                } else if (cp < 0x10000) {
+                    dst[j++] = (char)(0xE0 | cp >> 12);
+                    dst[j++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    dst[j++] = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    dst[j++] = (char)(0xF0 | cp >> 18);
+                    dst[j++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    dst[j++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    dst[j++] = (char)(0x80 | (cp & 0x3F));
+                }
+                break;
+            }
+            default: return false;
+        }
+    }
+    if (*v != '"') return false;
+    dst[j] = 0;
+    return true;
+}
+
+/* Numeric value -> double. False for absent / true / false / null / string. */
+static bool jnum(const char *v, double *out) {
+    if (!v) return false;
+    v = jws(v);
+    if (!(*v == '-' || (*v >= '0' && *v <= '9'))) return false;
+    *out = strtod(v, NULL);
+    return true;
 }
 
 /* --------------------------------------------------------- /proc, /sys ---- */
@@ -460,11 +612,12 @@ static void state_dir(char *dst, size_t cap) {
     snprintf(dst, cap, "%s/.claude/cache", HOME);
 }
 
-static void state_file(const cJSON *root, char *dst, size_t cap) {
-    const char *sid = jstr(jget(root, "session_id"));
+static void state_file(const char *root, char *dst, size_t cap) {
+    char sid[128];
+    bool has_sid = jstr(jget(root, "session_id"), sid, sizeof sid) && sid[0];
     char clean[65], dir[256];
     size_t j = 0;
-    if (sid) {
+    if (has_sid) {
         for (size_t i = 0; sid[i] && j < 64; i++) {
             char ch = sid[i];
             bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
@@ -578,17 +731,18 @@ static char *read_stdin(void) {
 }
 
 /* usage segment: N%<reset>, % colored by use_color, reset dim, no space. */
-static bool usage_seg(const cJSON *rl, const char *node, const char *glyph, SB *dst) {
-    const cJSON *o = jget(rl, node);
-    const cJSON *used = jget(o, "used_percentage");
+static bool usage_seg(const char *rl, const char *node, const char *glyph, SB *dst) {
+    const char *o = jget(rl, node);
+    const char *used = jget(o, "used_percentage");
     if (!used) used = jget(o, "usedPercentage");
-    if (!cJSON_IsNumber(used)) return false;
-    const cJSON *reset = jget(o, "resets_at");
+    double uv;
+    if (!jnum(used, &uv)) return false;
+    const char *reset = jget(o, "resets_at");
     if (!reset) reset = jget(o, "resetsAt");
     char label[32];
     fmt_delta(parse_reset(reset), label, sizeof label);
     if (glyph[0]) sb_c(dst, DIM, "%s", glyph);
-    sb_c(dst, use_color(used->valuedouble), "%ld%%", iround(used->valuedouble));
+    sb_c(dst, use_color(uv), "%ld%%", iround(uv));
     sb_c(dst, DIM, "%s", label);
     return true;
 }
@@ -601,17 +755,29 @@ int main(void) {
     G = NERD ? &G_NERD : &G_PLAIN;
 
     char *raw = read_stdin();
-    cJSON *root = raw ? cJSON_Parse(raw) : NULL;   /* NULL on garbage: fine */
+    /* Accept the document only if it parses completely (like json.loads). */
+    const char *root = NULL;
+    if (raw) {
+        const char *p = jws(raw);
+        if (*p == '{') {
+            const char *end = jskip(p, 0);
+            if (end && *jws(end) == 0) root = p;
+        }
+    }
 
     SB dirs = {0}, mid = {0}, sys_ = {0};
 
     /* --- dirs --- */
-    const cJSON *ws = jget(root, "workspace");
-    const char *current = jstr(jget(ws, "current_dir"));
-    if (!current) current = jstr(jget(root, "cwd"));
-    char cwdbuf[1024];
+    const char *ws = jget(root, "workspace");
+    char curbuf[2048], launchbuf[2048], cwdbuf[1024];
+    const char *current = NULL, *launch = NULL;
+    if (jstr(jget(ws, "current_dir"), curbuf, sizeof curbuf) && curbuf[0])
+        current = curbuf;
+    if (!current && jstr(jget(root, "cwd"), curbuf, sizeof curbuf) && curbuf[0])
+        current = curbuf;
     if (!current) current = getcwd(cwdbuf, sizeof cwdbuf) ? cwdbuf : "";
-    const char *launch = jstr(jget(ws, "project_dir"));
+    if (jstr(jget(ws, "project_dir"), launchbuf, sizeof launchbuf) && launchbuf[0])
+        launch = launchbuf;
     if (!launch) launch = current;
 
     char cur_s[256], launch_s[256], n1[1024], n2[1024];
@@ -632,23 +798,28 @@ int main(void) {
     sb_c(&dirs, BOLD, "%s", cur_s);
 
     /* --- model + context + usage --- */
-    const cJSON *mdl = jget(root, "model");
-    const char *model = jstr(jget(mdl, "display_name"));
-    if (!model) model = jstr(jget(mdl, "id"));
+    const char *mdl = jget(root, "model");
+    char modelbuf[256];
+    const char *model = NULL;
+    if (jstr(jget(mdl, "display_name"), modelbuf, sizeof modelbuf) && modelbuf[0])
+        model = modelbuf;
+    if (!model && jstr(jget(mdl, "id"), modelbuf, sizeof modelbuf) && modelbuf[0])
+        model = modelbuf;
     if (!model) model = "?";
     if (G->model[0]) { sb_c(&mid, "\033[35m", "%s", G->model); sb_raw(&mid, " "); }
     sb_c(&mid, BOLD, "%s", model);
 
-    const cJSON *cw = jget(root, "context_window");
-    const cJSON *ctx = jget(cw, "used_percentage");
+    const char *cw = jget(root, "context_window");
+    const char *ctx = jget(cw, "used_percentage");
     if (!ctx) ctx = jget(cw, "usedPercentage");
-    if (cJSON_IsNumber(ctx)) {
+    double ctxv;
+    if (jnum(ctx, &ctxv)) {
         sb_raw(&mid, " ");
         if (G->ctx[0]) sb_c(&mid, DIM, "%s", G->ctx);
-        sb_c(&mid, pct_color(ctx->valuedouble), "%ld%%", iround(ctx->valuedouble));
+        sb_c(&mid, pct_color(ctxv), "%ld%%", iround(ctxv));
     }
 
-    const cJSON *rl = jget(root, "rate_limits");
+    const char *rl = jget(root, "rate_limits");
     SB seg = {0};
     if (usage_seg(rl, "five_hour", G->t5h, &seg)) {
         sb_raw(&mid, " %s", seg.buf);
@@ -742,7 +913,6 @@ int main(void) {
         fputs(sys_.buf, stdout);
     }
 
-    cJSON_Delete(root);
     free(raw);
     return 0;
 }

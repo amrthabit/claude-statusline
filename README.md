@@ -34,8 +34,8 @@ about **0.9 ms** — cheap enough to refresh every second.
   until they cross 10 MiB/s (amber) or 30 MiB/s (red)
 - **Never breaks a render** — malformed stdin, missing fields, unreadable
   `/proc`, corrupt state: every segment fails soft and is simply omitted
-- **Zero runtime dependencies** — a single plain-libc binary; cJSON is
-  vendored and compiled in
+- **A single self-contained `.c` file** — no vendored code, no libraries
+  beyond libc; even the JSON reader is ~180 lines of the same file
 
 Designed for a **Linux laptop** and a **Claude subscription**: it expects
 `/proc` + `/sys/class/power_supply` (Linux-only — no macOS/BSD), skips
@@ -83,7 +83,7 @@ All thresholds are `#define`s in the CONFIG block at the top of `statusline.c`
 
 ## Files
 
-- `statusline.c` — the implementation
+- `statusline.c` — the entire implementation, one file
 - `statusline.py` — the original Python implementation, kept as the reference
   spec; `test/parity.sh` diffs the two byte-for-byte on generated inputs
 - `vendor/cJSON.{c,h}` — vendored [cJSON](https://github.com/DaveGamble/cJSON) v1.7.18 (MIT)
