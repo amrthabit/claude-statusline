@@ -1,9 +1,8 @@
 # statusline
 
 A fast, compact statusline for [Claude Code](https://claude.com/claude-code),
-written in C. It reads the status JSON Claude Code pipes on stdin, samples
-system metrics from `/proc` and `/sys`, and prints one color-coded line in
-about **0.7 ms** — cheap enough to refresh every second.
+in one C file. Reads Claude's status JSON on stdin, samples `/proc` + `/sys`,
+prints one color-coded line in ~**0.7 ms**.
 
 ![statusline](docs/statusline-full.png)
 
@@ -13,65 +12,36 @@ about **0.7 ms** — cheap enough to refresh every second.
 
 ## Features
 
-- **Directories** — launch dir and current dir, collapsed into one when they
-  match, with `~` substitution and middle-elision for long paths
+- **Directories** — launch and current dir, collapsed when equal, `~` substitution, middle-elision for long paths
 - **Model + context** — active model name and context-window usage %
-- **Plan usage** — the 5-hour and 7-day rate-limit windows with a countdown to
-  each reset (`20%4h9m`), straight from the official `rate_limits` data Claude
-  Code provides — no transcript scraping or extra API calls. This is for
-  **subscription plans** (Pro/Max); on API-key billing Claude Code doesn't
-  send `rate_limits`, so these two segments simply don't appear
-- **Battery** — charge % with a glyph that tracks the level (full → empty
-  ramp) and switches to a dedicated charging glyph (`󰂄`) while plugged in
-- **RAM & disk** — used % plus free space at a glance (`53%3.7G`)
-- **CPU, disk IO, network** — true rates computed from `/proc` deltas between
-  refreshes, persisted per session (concurrent Claude sessions don't corrupt
-  each other's readings)
-- **Zero disk writes** — the only state (one ~100-byte counter snapshot per
-  session) lives in RAM-backed tmpfs (`$XDG_RUNTIME_DIR`, falling back to
-  `/dev/shm`) and vanishes at logout; nothing ever touches the SSD
-- **Color as the signal** — green when fine, amber at ≥70%, red at ≥80% for
-  percentages; battery inverted (amber ≤30%, red ≤15%); IO/net stay uncolored
-  until they cross 10 MiB/s (amber) or 30 MiB/s (red)
-- **Never breaks a render** — malformed stdin, missing fields, unreadable
-  `/proc`, corrupt state: every segment fails soft and is simply omitted
-- **A single self-contained `.c` file** — no vendored code, no libraries
-  beyond libc; even the JSON reader is ~180 lines of the same file
-- **Lean by measurement** — a steady-state render is 19 syscalls, zero heap
-  allocations, and zero writes (raw `open/read/close` into static buffers,
-  battery sysfs name memoized, output emitted in a single `write`); profiled
-  with `strace -c` rather than guessed
+- **Plan usage** — 5-hour and 7-day usage with reset countdowns (`20%4h9m`), from official `rate_limits` — subscribers only
+- **Battery** — charge % with a level-ramp glyph; dedicated `󰂄` glyph while charging
+- **RAM & disk** — used % plus free space (`53%3.7G`)
+- **CPU, disk IO, network** — true rates from `/proc` deltas, tracked per session without collisions
+- **Zero disk writes** — state (~100 bytes/session) lives in tmpfs (`$XDG_RUNTIME_DIR`), vanishes at logout
+- **Color as the signal** — green fine, amber ≥70%, red ≥80%; battery inverted; IO/net amber ≥10 MiB/s, red ≥30
+- **Never breaks a render** — malformed stdin, missing fields, unreadable `/proc`: segments fail soft
+- **Self-contained** — one `.c` file, nothing beyond libc; the JSON reader is ~180 lines of it
+- **Lean by measurement** — 19 syscalls, zero allocations, zero writes per steady render; profiled, not guessed
 
-Designed for a **Linux laptop** and a **Claude subscription**: it expects
-`/proc` + `/sys/class/power_supply` (Linux-only — no macOS/BSD), skips
-loopback/virtual NICs and non-physical disks when summing traffic, and the
-plan-usage segments assume Pro/Max rate-limit data. On a desktop, VM, or
-API-key billing it still works — the battery and usage segments just
-disappear.
+Built for a **Linux laptop** on a **Claude subscription**. Desktops, VMs, and
+API-key billing still work — the missing segments just disappear.
 
 ## Prerequisites
 
-- **Linux** with `/proc` and `/sys` (any modern distro; the battery segment
-  needs `/sys/class/power_supply/BAT*`)
-- **To build**: `gcc`, `make`, and libc headers — on Debian/Ubuntu:
-  `sudo apt install gcc make libc6-dev`. Optionally add `musl-tools`: the
-  Makefile prefers `musl-gcc`, whose process init is ~10× faster than
-  glibc's (~0.04 ms vs ~0.45 ms per render)
-- **A Nerd Font (v3)** in your terminal for the glyphs (e.g. JetBrainsMono
-  Nerd Font) — or set `CLAUDE_STATUSLINE_NERD=0` for plain-text labels
-- `make test` (optional) also needs `python3` and `bash` for the parity
-  harness against the Python reference
+- Linux with `/proc` and `/sys`; battery needs `/sys/class/power_supply/BAT*`
+- `gcc`, `make`, libc headers (`sudo apt install gcc make libc6-dev`); optional `musl-tools` for ~10× faster init
+- A Nerd Font (v3) for glyphs, or `CLAUDE_STATUSLINE_NERD=0` for plain text
+- `make test` also needs `python3` and `bash`
 
-## Build
+## Build & deploy
 
 ```
 make            # single .c, static; prefers musl-gcc, falls back to gcc
-make test       # byte-for-byte parity vs statusline.py reference
+make test       # byte-for-byte parity vs the Python reference
 ```
 
-## Deploy
-
-Point `statusLine` at the binary in `~/.claude/settings.json`:
+Then point `statusLine` at the binary in `~/.claude/settings.json`:
 
 ```json
 "statusLine": {
@@ -84,12 +54,9 @@ Point `statusLine` at the binary in `~/.claude/settings.json`:
 
 ## Tuning
 
-All thresholds are `#define`s in the CONFIG block at the top of `statusline.c`
-(`SYS_WARN`/`SYS_BAD`, `USE_WARN`/`USE_BAD`, `RATE_WARN`/`RATE_BAD`,
-`RATE_MIN_INTERVAL`). Change, `make`, done.
+Thresholds are `#define`s in the CONFIG block atop `statusline.c`. Change, `make`, done.
 
 ## Files
 
-- `statusline.c` — the entire implementation, one file
-- `statusline.py` — the original Python implementation, kept as the reference
-  spec; `test/parity.sh` diffs the two byte-for-byte on generated inputs
+- `statusline.c` — the entire implementation
+- `statusline.py` — Python reference; `test/parity.sh` diffs the two byte-for-byte
