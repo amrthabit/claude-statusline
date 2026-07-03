@@ -58,7 +58,7 @@ disappear.
 ## Build
 
 ```
-make            # gcc -O2 -Wall -Wextra, links vendor/cJSON
+make            # single .c, static; prefers musl-gcc, falls back to gcc
 make test       # byte-for-byte parity vs statusline.py reference
 ```
 
@@ -86,4 +86,3 @@ All thresholds are `#define`s in the CONFIG block at the top of `statusline.c`
 - `statusline.c` — the entire implementation, one file
 - `statusline.py` — the original Python implementation, kept as the reference
   spec; `test/parity.sh` diffs the two byte-for-byte on generated inputs
-- `vendor/cJSON.{c,h}` — vendored [cJSON](https://github.com/DaveGamble/cJSON) v1.7.18 (MIT)
