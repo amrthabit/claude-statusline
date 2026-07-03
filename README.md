@@ -21,7 +21,8 @@ about **0.7 ms** — cheap enough to refresh every second.
   Code provides — no transcript scraping or extra API calls. This is for
   **subscription plans** (Pro/Max); on API-key billing Claude Code doesn't
   send `rate_limits`, so these two segments simply don't appear
-- **Battery** — charge % with a level glyph, `⚡` while charging
+- **Battery** — charge % with a glyph that tracks the level (full → empty
+  ramp) and switches to a dedicated charging glyph (`󰂄`) while plugged in
 - **RAM & disk** — used % plus free space at a glance (`53%3.7G`)
 - **CPU, disk IO, network** — true rates computed from `/proc` deltas between
   refreshes, persisted per session (concurrent Claude sessions don't corrupt
@@ -36,6 +37,10 @@ about **0.7 ms** — cheap enough to refresh every second.
   `/proc`, corrupt state: every segment fails soft and is simply omitted
 - **A single self-contained `.c` file** — no vendored code, no libraries
   beyond libc; even the JSON reader is ~180 lines of the same file
+- **Lean by measurement** — a steady-state render is 19 syscalls, zero heap
+  allocations, and zero writes (raw `open/read/close` into static buffers,
+  battery sysfs name memoized, output emitted in a single `write`); profiled
+  with `strace -c` rather than guessed
 
 Designed for a **Linux laptop** and a **Claude subscription**: it expects
 `/proc` + `/sys/class/power_supply` (Linux-only — no macOS/BSD), skips
@@ -49,7 +54,9 @@ disappear.
 - **Linux** with `/proc` and `/sys` (any modern distro; the battery segment
   needs `/sys/class/power_supply/BAT*`)
 - **To build**: `gcc`, `make`, and libc headers — on Debian/Ubuntu:
-  `sudo apt install gcc make libc6-dev`
+  `sudo apt install gcc make libc6-dev`. Optionally add `musl-tools`: the
+  Makefile prefers `musl-gcc`, whose process init is ~10× faster than
+  glibc's (~0.04 ms vs ~0.45 ms per render)
 - **A Nerd Font (v3)** in your terminal for the glyphs (e.g. JetBrainsMono
   Nerd Font) — or set `CLAUDE_STATUSLINE_NERD=0` for plain-text labels
 - `make test` (optional) also needs `python3` and `bash` for the parity
