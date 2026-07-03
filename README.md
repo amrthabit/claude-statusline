@@ -18,7 +18,9 @@ about **1.3 ms** — cheap enough to refresh every second.
 - **Model + context** — active model name and context-window usage %
 - **Plan usage** — the 5-hour and 7-day rate-limit windows with a countdown to
   each reset (`20%4h9m`), straight from the official `rate_limits` data Claude
-  Code provides — no transcript scraping or extra API calls
+  Code provides — no transcript scraping or extra API calls. This is for
+  **subscription plans** (Pro/Max); on API-key billing Claude Code doesn't
+  send `rate_limits`, so these two segments simply don't appear
 - **Battery** — charge % with a level glyph, `⚡` while charging
 - **RAM & disk** — used % plus free space at a glance (`53%3.7G`)
 - **CPU, disk IO, network** — true rates computed from `/proc` deltas between
@@ -35,10 +37,12 @@ about **1.3 ms** — cheap enough to refresh every second.
 - **Zero runtime dependencies** — a single plain-libc binary; cJSON is
   vendored and compiled in
 
-Designed for a **Linux laptop**: it expects `/proc` + `/sys/class/power_supply`
-(Linux-only — no macOS/BSD) and skips loopback/virtual NICs and non-physical
-disks when summing traffic. On a desktop or VM it still works — the battery
-segment just disappears.
+Designed for a **Linux laptop** and a **Claude subscription**: it expects
+`/proc` + `/sys/class/power_supply` (Linux-only — no macOS/BSD), skips
+loopback/virtual NICs and non-physical disks when summing traffic, and the
+plan-usage segments assume Pro/Max rate-limit data. On a desktop, VM, or
+API-key billing it still works — the battery and usage segments just
+disappear.
 
 ## Prerequisites
 
