@@ -3,7 +3,7 @@
 A fast, compact statusline for [Claude Code](https://claude.com/claude-code),
 written in C. It reads the status JSON Claude Code pipes on stdin, samples
 system metrics from `/proc` and `/sys`, and prints one color-coded line in
-about **1.8 ms** — cheap enough to refresh every second.
+about **1.3 ms** — cheap enough to refresh every second.
 
 ![statusline](docs/statusline-full.png)
 
