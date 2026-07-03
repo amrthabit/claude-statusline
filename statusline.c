@@ -1401,7 +1401,7 @@ int main(void) {
     if (isnan(cpu)) cpu = loadavg_pct();   /* first-render fallback */
     if (!isnan(cpu)) {
         SYS_SEP();
-        sb_c(&sys_, pct_color(cpu), "%ld%%", iround(cpu));
+        sb_c(&sys_, pct_color(cpu), "%02ld%%", iround(cpu));
         ICON_SEP();
         sb_c(&sys_, DIM, "%s", G->cpu);
         double tempc;

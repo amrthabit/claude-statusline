@@ -731,7 +731,7 @@ def main():
     if cpu is None:
         cpu = loadavg_pct()   # first-render fallback until a delta exists
     if cpu is not None:
-        cpu_seg = c(f"{int(round(cpu))}%", pct_color(cpu)) + ICON_SEP + c(G["cpu"], DIM)
+        cpu_seg = c(f"{int(round(cpu)):02d}%", pct_color(cpu)) + ICON_SEP + c(G["cpu"], DIM)
         tempc = read_cpu_temp()
         if tempc is not None:
             cpu_seg += ICON_SEP + c(f"{int(round(tempc))}°C", DIM)
