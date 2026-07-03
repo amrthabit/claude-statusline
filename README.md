@@ -4,7 +4,7 @@ A fast, compact statusline for [Claude Code](https://claude.com/claude-code),
 in one C file. Reads Claude's status JSON on stdin, samples `/proc` + `/sys`,
 prints one color-coded line in ~**0.7 ms**.
 
-![statusline](docs/statusline-full.png)
+![statusline](docs/statusline-preview.png)
 
 ```
  user@host:launch › current │ Model effort ctx%size 5h%reset 7d%reset │ BAT RAM CPU°temp DISK IO NET date session#
