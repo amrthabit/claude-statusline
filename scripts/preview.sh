@@ -59,16 +59,31 @@ echo "== rendering docs/statusline-preview.png =="
 VHS_NO_SANDBOX=true vhs docs/preview.tape
 rm -f ignored.gif
 # Autocrop: VHS's canvas math leaves uneven margins (plus a dark window-edge
-# band at the bottom); trim to the content with a small uniform border.
+# band at the bottom); trim to the content with a small uniform border. The
+# right edge comes from the TEXT content only - the full-width rules would
+# otherwise pin the box to the canvas edge and leave a long rule-only
+# stretch; cutting them at the crop line still reads as edge-to-edge rules.
 python3 - <<'PYEOF'
 from PIL import Image, ImageChops
 im = Image.open('docs/statusline-preview.png').convert('RGB')
 bg = im.getpixel((5, 5))
 diff = ImageChops.difference(im, Image.new('RGB', im.size, bg))
-bbox = diff.convert('L').point(lambda v: 255 if v > 24 else 0).getbbox()
+mask = diff.convert('L').point(lambda v: 255 if v > 24 else 0)
+bbox = mask.getbbox()
 if bbox:
-    m = 14
     l, t, r, b = bbox
+    px = mask.load()
+    text_r = 0
+    for y in range(t, b):
+        row_lit = [x for x in range(l, r, 4) if px[x, y]]
+        if not row_lit:
+            continue
+        if len(row_lit) > 0.9 * ((r - l) // 4):
+            continue                      # a rule row - ignore for right edge
+        text_r = max(text_r, row_lit[-1])
+    if text_r:
+        r = min(r, text_r + 8)
+    m = 14
     im.crop((max(0, l - m), max(0, t - m),
              min(im.width, r + m), min(im.height, b + m))
       ).save('docs/statusline-preview.png')
