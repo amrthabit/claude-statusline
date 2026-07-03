@@ -519,16 +519,19 @@ static void rate_metrics(const char *path, State *out_rates) {
     double dt = now - st.ts;
 
     long long ct = 0, ci = 0, rx = 0, tx = 0, ior = 0, iow = 0;
-    bool has_cpu = read_cpu_snapshot(&ct, &ci);
-    bool has_net = read_net_snapshot(&rx, &tx);
-    bool has_io  = read_io_snapshot(&ior, &iow);
-
+    /* Reuse check FIRST: Claude re-renders on events (keystrokes, tool calls),
+     * not just the refresh timer. During bursts the reuse path hits and the
+     * three snapshot reads below would be pure waste.                       */
     bool any_cached = !isnan(st.r_cpu) || !isnan(st.r_rx) || !isnan(st.r_tx) ||
                       !isnan(st.r_ior) || !isnan(st.r_iow);
     if (any_cached && dt >= 0 && dt < RATE_MIN_INTERVAL) {
         *out_rates = st;             /* reuse; leave file untouched */
         return;
     }
+
+    bool has_cpu = read_cpu_snapshot(&ct, &ci);
+    bool has_net = read_net_snapshot(&rx, &tx);
+    bool has_io  = read_io_snapshot(&ior, &iow);
 
     State ns = st;                   /* rates carry forward, never blank out */
     if (has_cpu && st.has_cpu && dt > 0) {
