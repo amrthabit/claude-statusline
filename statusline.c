@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
 
 /* ---------------------------------------------------------------- CONFIG -- */
 /* Color thresholds (percent). >=WARN -> amber, >=BAD -> red, else green.    */
@@ -45,6 +46,11 @@
 #define RATE_BAD  (30.0 * 1024 * 1024)  /* 30 MiB/s */
 
 #define PATH_MAXLEN 30   /* dir display length before middle-elision */
+
+/* A session counts as "active" if its state file was touched within this
+ * many seconds - matches refreshInterval:1 polling with margin for jitter,
+ * so a closed session (no longer being rendered) drops out quickly.        */
+#define ACTIVE_SESSION_WINDOW 10.0
 /* -------------------------------------------------------------------------- */
 
 /* ANSI */
@@ -62,33 +68,44 @@ static const char *HOME = "";
 /* Glyphs (Nerd Font v3), with plain-text fallbacks. Selected at runtime. */
 typedef struct {
     const char *launch, *cur, *model, *ctx, *t5h, *t7d,
-               *ram, *cpu, *disk, *io, *net, *arrow, *bat;
+               *ram, *cpu, *disk, *io, *net, *arrow, *bat, *sessions;
 } Glyphs;
 static const Glyphs G_NERD = {
-    .launch = u8"",      /* fa home        */
-    .cur    = u8"",      /* fa folder-open */
-    .model  = "",              /* (no icon)      */
-    .ctx    = "",              /* (no icon)      */
-    .t5h    = "",              /* (no icon)      */
-    .t7d    = "",              /* (no icon)      */
-    .ram    = u8"\U000F0F58",  /* md memory      */
-    .cpu    = u8"",      /* fa microchip   */
-    .disk   = u8"\U000F02CA",  /* md harddisk    */
-    .io     = u8"",      /* fa exchange    */
-    .net    = u8"\U000F0200",  /* md ethernet    */
-    .arrow  = u8"",      /* fa angle-right */
-    .bat    = "",              /* chosen by level, see bat_glyph */
+    .launch   = "",              /* (no icon)      */
+    .cur      = "",              /* (no icon)      */
+    .model    = "",              /* (no icon)      */
+    .ctx      = "",              /* (no icon)      */
+    .t5h      = "",              /* (no icon)      */
+    .t7d      = "",              /* (no icon)      */
+    .ram      = u8"\U000F0F58",  /* md memory      */
+    .cpu      = u8"\U000F061A",  /* md chip        */
+    .disk     = u8"\U000F02CA",  /* md harddisk    */
+    .io       = u8"",      /* fa exchange    */
+    .net      = u8"\U000F0200",  /* md ethernet    */
+    .arrow    = u8"",      /* fa angle-right */
+    .bat      = "",              /* chosen by level, see bat_glyph */
+    .sessions = u8"\U000F000E",  /* md account-multiple */
 };
 static const Glyphs G_PLAIN = {
     .launch = "L", .cur = "D", .model = "M", .ctx = "ctx",
     .t5h = "5h", .t7d = "7d", .ram = "RAM", .cpu = "CPU",
     .disk = "DSK", .io = "IO", .net = "NET", .arrow = ">", .bat = "BAT",
+    .sessions = "SES",
 };
 static const Glyphs *G = &G_NERD;
 
-/* fa battery ramp U+F240 (full) .. U+F244 (empty) */
-static const char *BAT_RAMP[5] = {
-    u8"", u8"", u8"", u8"", u8"",
+/* md battery ramp, 11 steps (0/10/../100), discharging and charging variants.
+ * Finer-grained than Font Awesome's 5-step ramp - matches the displayed %
+ * more closely.                                                             */
+static const char *BAT_RAMP[11] = {
+    u8"\U000F008E", u8"\U000F007A", u8"\U000F007B", u8"\U000F007C", u8"\U000F007D",
+    u8"\U000F007E", u8"\U000F007F", u8"\U000F0080", u8"\U000F0081", u8"\U000F0082",
+    u8"\U000F0079",
+};
+static const char *BAT_CHG_RAMP[11] = {
+    u8"\U000F089F", u8"\U000F089C", u8"\U000F0086", u8"\U000F0087", u8"\U000F0088",
+    u8"\U000F089D", u8"\U000F0089", u8"\U000F089E", u8"\U000F008A", u8"\U000F008B",
+    u8"\U000F0084",
 };
 
 /* ------------------------------------------------------- string building -- */
@@ -135,9 +152,9 @@ static const char *bat_color(int pct, bool charging) {
 }
 static const char *bat_glyph(int pct, bool charging) {
     if (!NERD) return G->bat;
-    if (charging) return u8"\U000F0084";   /* md battery-charging */
-    int idx = pct >= 88 ? 0 : pct >= 63 ? 1 : pct >= 38 ? 2 : pct >= 13 ? 3 : 4;
-    return BAT_RAMP[idx];
+    int idx = (pct + 5) / 10;
+    idx = idx < 0 ? 0 : idx > 10 ? 10 : idx;
+    return (charging ? BAT_CHG_RAMP : BAT_RAMP)[idx];
 }
 
 /* --------------------------------------------------------------- helpers -- */
@@ -158,7 +175,46 @@ static void human(double n, char *dst, size_t cap) {
     }
 }
 
+/* Token count -> compact decimal string (200000 -> "200K", 1000000 -> "1.0M"). */
+static void human_tok(double n, char *dst, size_t cap) {
+    static const char *UNITS[] = {"", "K", "M"};
+    for (int i = 0; i < 3; i++) {
+        if (n < 1000.0 || i == 2) {
+            if (i == 0)           snprintf(dst, cap, "%ld", (long)n);
+            else if (n < 10.0)    snprintf(dst, cap, "%.1f%s", n, UNITS[i]);
+            else                  snprintf(dst, cap, "%ld%s", iround(n), UNITS[i]);
+            return;
+        }
+        n /= 1000.0;
+    }
+}
+
+/* effort.level -> 2-letter abbreviation; unknown levels pass through as-is. */
+static const char *effort_abbr(const char *lvl, char *buf, size_t cap) {
+    static const struct { const char *k, *v; } MAP[] = {
+        {"low", "lo"}, {"medium", "md"}, {"high", "hi"}, {"xhigh", "xh"}, {"max", "mx"},
+    };
+    for (size_t i = 0; i < sizeof MAP / sizeof MAP[0]; i++)
+        if (!strcmp(lvl, MAP[i].k)) return MAP[i].v;
+    snprintf(buf, cap, "%s", lvl);
+    return buf;
+}
+
 static void gbs(double n, char *dst, size_t cap) { snprintf(dst, cap, "%.1fG", n / 1e9); }
+
+/* "user@host", env + gethostname() only - no getpwuid/NSS, keeps the static
+ * binary's "no NSS/DNS" property intact. Absent env or a failed syscall
+ * just drops the segment.                                                   */
+static bool get_user_host(char *dst, size_t cap) {
+    const char *user = getenv("USER");
+    if (!user || !user[0]) user = getenv("LOGNAME");
+    if (!user || !user[0]) return false;
+    char host[256];
+    if (gethostname(host, sizeof host) != 0) return false;
+    host[sizeof host - 1] = 0;
+    snprintf(dst, cap, "%s@%s", user, host);
+    return true;
+}
 
 /* ~ substitution + middle elision, ported from shorten().
  * snprintf truncation here is by design: pathological >250-char path parts
@@ -491,6 +547,48 @@ have:;
     return true;
 }
 
+/* CPU package temperature, thermal zone memoized in state like the battery
+ * name: the warm path reads the zone's temp file directly. zone: "" =
+ * unknown -> scan; "-" = scanned, no x86_pkg_temp zone found (non-Intel or
+ * no such sensor - the segment just doesn't show a temp).                   */
+static bool read_cpu_temp(char *zone, size_t zonecap, double *celsius) {
+    char path[64], buf[32];
+    if (!strcmp(zone, "-")) return false;
+    if (zone[0]) {
+        snprintf(path, sizeof path, "/sys/class/thermal/%s/temp", zone);
+        if (rdfirst(path, buf, sizeof buf) > 0) goto have;
+        zone[0] = 0;                               /* stale name -> rescan */
+    }
+    {
+        char best[32] = "";
+        DIR *d = opendir("/sys/class/thermal");
+        if (!d) { snprintf(zone, zonecap, "-"); return false; }
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strncmp(e->d_name, "thermal_zone", 12) != 0) continue;
+            char tpath[300], tbuf[64];
+            snprintf(tpath, sizeof tpath, "/sys/class/thermal/%s/type", e->d_name);
+            if (rdfirst(tpath, tbuf, sizeof tbuf) <= 0) continue;
+            tbuf[strcspn(tbuf, "\n")] = 0;
+            if (!strcmp(tbuf, "x86_pkg_temp") && strlen(e->d_name) < sizeof best) {
+                snprintf(best, sizeof best, "%s", e->d_name);
+                break;
+            }
+        }
+        closedir(d);
+        if (!best[0]) { snprintf(zone, zonecap, "-"); return false; }
+        snprintf(zone, zonecap, "%s", best);
+        snprintf(path, sizeof path, "/sys/class/thermal/%s/temp", zone);
+        if (rdfirst(path, buf, sizeof buf) <= 0) return false;
+    }
+have:;
+    char *end;
+    long v = strtol(buf, &end, 10);
+    if (end == buf) return false;
+    *celsius = (double)v / 1000.0;
+    return true;
+}
+
 static bool read_mem(double *used_pct, double *avail_bytes) {
     char buf[4096];   /* whole meminfo fits; needed lines are at the top */
     if (rdfirst("/proc/meminfo", buf, sizeof buf) <= 0) return false;
@@ -645,15 +743,23 @@ static double loadavg_pct(void) {
 /* ------------------------------------------------------------ rate state -- */
 /* Per-session state so concurrent Claude sessions don't stomp each other's
  * delta snapshots. Flat text, one line:
- *   ts  hc ct ci  hn rx tx  hi ior iow  cpu rxr txr iorr iowr  bat
+ *   ts  hc ct ci  hn rx tx  hi ior iow  cpu rxr txr iorr iowr  bat  full_ts tainted was_charging therm sessions
  * (h* = snapshot-present flags; rates are doubles, "nan" = absent; bat is
- * the memoized battery sysfs name, "-" = none found)                        */
+ * the memoized battery sysfs name, "-" = none found; full_ts/tainted/
+ * was_charging/therm/sessions are optional trailing fields - absent in files
+ * written before they were added, which parses as the safe "never seen
+ * 100%" / "never scanned" defaults)                                         */
 typedef struct State {
     double ts;
     bool has_cpu, has_net, has_io;
     long long ct, ci, rx, tx, ior, iow;
     double r_cpu, r_rx, r_tx, r_ior, r_iow;   /* cached rates, NAN = absent */
     char bat[32];
+    double full_ts;    /* wall-clock time of the last clean unplug-from-full, 0 = never */
+    bool tainted;       /* currently charging and hasn't reached >=99% yet this cycle */
+    bool was_charging;  /* charging (or full) last render (edge detector for full_ts) */
+    char therm[32];      /* memoized thermal zone name, "-" = none found */
+    int sessions;        /* cached active-session count, 0 = never computed */
 } State;
 
 static void state_init(State *s) {
@@ -696,6 +802,40 @@ static void state_file(const char *root, char *dst, size_t cap) {
     snprintf(dst, cap, "%s/claude-statusline-state-%s.dat", dir, clean);
 }
 
+/* Every open Claude Code session touches its own state file roughly every
+ * refreshInterval (1s), so a fresh mtime is a reliable proxy for "still
+ * open" - closed sessions stop updating immediately and age out within
+ * ACTIVE_SESSION_WINDOW. self_path is skipped in the scan and always
+ * counted (+1), so a session counts itself even before its own first save.
+ * Files well past the window (STALE_CLEANUP_AGE) are from sessions that
+ * ended without a logout to wipe tmpfs (a killed terminal, a crash) - they
+ * cost a stat() on every render forever otherwise, so this opportunistically
+ * unlinks them while it's already paying for the scan.                     */
+#define STALE_CLEANUP_AGE (300.0)
+static int count_active_sessions(const char *dir, const char *self_path) {
+    DIR *d = opendir(dir);
+    if (!d) return 1;
+    double now = now_monotonicish();
+    int count = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "claude-statusline-state-", 24) != 0) continue;
+        size_t nlen = strlen(e->d_name);
+        if (nlen < 4 || strcmp(e->d_name + nlen - 4, ".dat") != 0) continue;
+        char full[600];
+        if ((size_t)snprintf(full, sizeof full, "%s/%s", dir, e->d_name) >= sizeof full)
+            continue;
+        if (!strcmp(full, self_path)) continue;
+        struct stat st;
+        if (stat(full, &st) != 0) continue;
+        double age = now - (double)st.st_mtime;
+        if (age < ACTIVE_SESSION_WINDOW) count++;
+        else if (age > STALE_CLEANUP_AGE) unlink(full);
+    }
+    closedir(d);
+    return count + 1;
+}
+
 static void state_load(const char *path, State *s) {
     state_init(s);
     char buf[512];
@@ -720,6 +860,30 @@ static void state_load(const char *path, State *s) {
     size_t bl = 0;
     while (p[bl] && p[bl] != ' ' && p[bl] != '\n' && bl < sizeof t.bat - 1) bl++;
     if (bl) { memcpy(t.bat, p, bl); t.bat[bl] = 0; }
+    p += bl;
+    while (*p == ' ' || *p == '\n') p++;   /* optional full_ts + tainted + was_charging */
+    double fts = strtod(p, &e);
+    if (e != p) {
+        t.full_ts = fts; p = e;
+        while (*p == ' ') p++;
+        long tn = strtol(p, &e, 10);
+        if (e != p) {
+            t.tainted = tn != 0; p = e;
+            while (*p == ' ') p++;
+            long wf = strtol(p, &e, 10);
+            if (e != p) {
+                t.was_charging = wf != 0; p = e;
+                while (*p == ' ') p++;                  /* optional therm-zone token */
+                size_t thl = 0;
+                while (p[thl] && p[thl] != ' ' && p[thl] != '\n' && thl < sizeof t.therm - 1) thl++;
+                if (thl) { memcpy(t.therm, p, thl); t.therm[thl] = 0; }
+                p += thl;
+                while (*p == ' ') p++;
+                long ns = strtol(p, &e, 10);
+                if (e != p) t.sessions = (int)ns;
+            }
+        }
+    }
     *s = t;
 }
 
@@ -727,11 +891,13 @@ static void state_save(const char *path, const State *s) {
     char tmp[640];   /* path buffer (600) + ".tmp" */
     char buf[512];
     int len = snprintf(buf, sizeof buf,
-            "%.6f %d %lld %lld %d %lld %lld %d %lld %lld %.17g %.17g %.17g %.17g %.17g %s\n",
+            "%.6f %d %lld %lld %d %lld %lld %d %lld %lld %.17g %.17g %.17g %.17g %.17g %s %.17g %d %d %s %d\n",
             s->ts, s->has_cpu, s->ct, s->ci, s->has_net, s->rx, s->tx,
             s->has_io, s->ior, s->iow,
             s->r_cpu, s->r_rx, s->r_tx, s->r_ior, s->r_iow,
-            s->bat[0] ? s->bat : "-");
+            s->bat[0] ? s->bat : "-",
+            s->full_ts, s->tainted, s->was_charging,
+            s->therm[0] ? s->therm : "-", s->sessions);
     if (len <= 0 || (size_t)len >= sizeof buf) return;
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     /* O_EXCL: never follow a pre-existing symlink (matters for /dev/shm) */
@@ -850,6 +1016,10 @@ int main(void) {
     SB dirs = {0}, mid = {0}, sys_ = {0};
 
     /* --- dirs --- */
+    char userhost[288];
+    if (get_user_host(userhost, sizeof userhost))
+        sb_c(&dirs, DIM, "%s:", userhost);
+
     const char *ws = jget(root, "workspace");
     char curbuf[2048], launchbuf[2048], cwdbuf[1024];
     const char *current = NULL, *launch = NULL;
@@ -868,15 +1038,13 @@ int main(void) {
     normalize(launch, n2, sizeof n2);
     if (strcmp(n1, n2) != 0) {
         shorten(launch, launch_s, sizeof launch_s);
-        sb_c(&dirs, DIM, "%s", G->launch);
-        sb_raw(&dirs, " ");
+        if (G->launch[0]) { sb_c(&dirs, DIM, "%s", G->launch); sb_raw(&dirs, " "); }
         sb_c(&dirs, DIM, "%s", launch_s);
         sb_raw(&dirs, " ");
         sb_c(&dirs, DIM, "%s", G->arrow);
         sb_raw(&dirs, " ");
     }
-    sb_c(&dirs, CYN, "%s", G->cur);
-    sb_raw(&dirs, " ");
+    if (G->cur[0]) { sb_c(&dirs, CYN, "%s", G->cur); sb_raw(&dirs, " "); }
     sb_c(&dirs, BOLD, "%s", cur_s);
 
     /* --- model + context + usage --- */
@@ -891,6 +1059,12 @@ int main(void) {
     if (G->model[0]) { sb_c(&mid, "\033[35m", "%s", G->model); sb_raw(&mid, " "); }
     sb_c(&mid, BOLD, "%s", model);
 
+    char lvlbuf[32], lvlabbr[32];
+    if (jstr(jget(jget(root, "effort"), "level"), lvlbuf, sizeof lvlbuf) && lvlbuf[0]) {
+        sb_raw(&mid, " ");
+        sb_c(&mid, DIM, "%s", effort_abbr(lvlbuf, lvlabbr, sizeof lvlabbr));
+    }
+
     const char *cw = jget(root, "context_window");
     const char *ctx = jget(cw, "used_percentage");
     if (!ctx) ctx = jget(cw, "usedPercentage");
@@ -899,6 +1073,12 @@ int main(void) {
         sb_raw(&mid, " ");
         if (G->ctx[0]) sb_c(&mid, DIM, "%s", G->ctx);
         sb_c(&mid, pct_color(ctxv), "%ld%%", iround(ctxv));
+        double sizev;
+        if (jnum(jget(cw, "context_window_size"), &sizev)) {
+            char sz[16];
+            human_tok(sizev, sz, sizeof sz);
+            sb_c(&mid, DIM, "%s", sz);
+        }
     }
 
     const char *rl = jget(root, "rate_limits");
@@ -919,26 +1099,64 @@ int main(void) {
     bool recomputed = rate_metrics(&rates);
     char oldbat[32];
     memcpy(oldbat, rates.bat, sizeof oldbat);
+    double old_full_ts = rates.full_ts;
+    bool old_tainted = rates.tainted;
+    bool old_was_charging = rates.was_charging;
+
+    /* Session count is only refreshed alongside the other rates (same
+     * RATE_MIN_INTERVAL gate via `recomputed`) - a burst of renders reuses
+     * the cached count instead of re-scanning the state dir every time.    */
+    if (recomputed || rates.sessions == 0) {
+        char sdir[256];
+        state_dir(sdir, sizeof sdir);
+        rates.sessions = count_active_sessions(sdir, sfile);
+    }
 
     bool first = true;
 #define SYS_SEP() do { if (!first) sb_raw(&sys_, " "); first = false; } while (0)
+    /* A Nerd Font icon fills its whole cell (no trailing space needed); the
+     * plain-text fallback ("RAM"/"CPU"/...) still needs one to stay readable. */
+#define ICON_SEP() do { if (!NERD) sb_raw(&sys_, " "); } while (0)
 
     int bpct; bool bchg;
     if (read_battery(rates.bat, sizeof rates.bat, &bpct, &bchg)) {
+        double now = now_monotonicish();
+        /* The trigger is the charging -> discharging transition, not the
+         * percentage: unplugging while the fuel gauge still reads a stale
+         * 100% must start the clock immediately, not whenever the number
+         * finally catches up. tainted tracks "still mid-charge, hasn't
+         * reached >=99% this cycle" - re-anchoring full_ts only fires when
+         * we go on-battery in a clean (untainted) state. Both fields are
+         * unconditionally on charging renders and edge-triggered on
+         * discharging ones, so a long steady stretch at 100% (or at any
+         * fixed discharging %) touches neither field again - no writes.     */
+        if (bchg) {
+            rates.tainted = bpct < 99;
+        } else if (rates.was_charging && !rates.tainted) {
+            rates.full_ts = now;
+        }
+        rates.was_charging = bchg;
         SYS_SEP();
         const char *bc = bat_color(bpct, bchg);
-        sb_c(&sys_, bc, "%s", bat_glyph(bpct, bchg));
-        sb_raw(&sys_, " ");
         sb_c(&sys_, bc, "%d%%", bpct);
+        ICON_SEP();
+        sb_c(&sys_, bc, "%s", bat_glyph(bpct, bchg));
+        if (rates.full_ts > 0 && !rates.tainted && !bchg) {
+            char dlabel[32];
+            fmt_delta(now - rates.full_ts, dlabel, sizeof dlabel);
+            ICON_SEP();
+            sb_c(&sys_, DIM, "%s", dlabel);
+        }
     }
 
     double ram_pct, ram_free;
     if (read_mem(&ram_pct, &ram_free)) {
         SYS_SEP();
         char fb[32]; gbs(ram_free, fb, sizeof fb);
-        sb_c(&sys_, DIM, "%s", G->ram);
-        sb_raw(&sys_, " ");
         sb_c(&sys_, pct_color(ram_pct), "%ld%%", iround(ram_pct));
+        ICON_SEP();
+        sb_c(&sys_, DIM, "%s", G->ram);
+        ICON_SEP();
         sb_c(&sys_, DIM, "%s", fb);
     }
 
@@ -946,18 +1164,24 @@ int main(void) {
     if (isnan(cpu)) cpu = loadavg_pct();   /* first-render fallback */
     if (!isnan(cpu)) {
         SYS_SEP();
-        sb_c(&sys_, DIM, "%s", G->cpu);
-        sb_raw(&sys_, " ");
         sb_c(&sys_, pct_color(cpu), "%ld%%", iround(cpu));
+        ICON_SEP();
+        sb_c(&sys_, DIM, "%s", G->cpu);
+        double tempc;
+        if (read_cpu_temp(rates.therm, sizeof rates.therm, &tempc)) {
+            ICON_SEP();
+            sb_c(&sys_, DIM, "%ld" u8"\U000000B0" "C", iround(tempc));
+        }
     }
 
     double disk_pct, disk_free;
     if (read_disk(&disk_pct, &disk_free)) {
         SYS_SEP();
         char fb[32]; gbs(disk_free, fb, sizeof fb);
-        sb_c(&sys_, DIM, "%s", G->disk);
-        sb_raw(&sys_, " ");
         sb_c(&sys_, pct_color(disk_pct), "%ld%%", iround(disk_pct));
+        ICON_SEP();
+        sb_c(&sys_, DIM, "%s", G->disk);
+        ICON_SEP();
         sb_c(&sys_, DIM, "%s", fb);
     }
 
@@ -968,10 +1192,11 @@ int main(void) {
         human(ior, hr, sizeof hr);
         human(iow, hw, sizeof hw);
         SYS_SEP();
-        sb_c(&sys_, DIM, "%s", G->io);
-        sb_raw(&sys_, " ");
         sb_c(&sys_, DIM, "R");
         sb_c(&sys_, rate_color(ior), "%s", hr);
+        ICON_SEP();
+        sb_c(&sys_, DIM, "%s", G->io);
+        ICON_SEP();
         sb_c(&sys_, DIM, "W");
         sb_c(&sys_, rate_color(iow), "%s", hw);
     }
@@ -983,15 +1208,33 @@ int main(void) {
         human(rx, hr, sizeof hr);
         human(tx, ht, sizeof ht);
         SYS_SEP();
-        sb_c(&sys_, DIM, "%s", G->net);
-        sb_raw(&sys_, " ");
         sb_c(&sys_, rate_color(rx), "%s%s", u8"↓", hr);
+        ICON_SEP();
+        sb_c(&sys_, DIM, "%s", G->net);
+        ICON_SEP();
         sb_c(&sys_, rate_color(tx), "%s%s", u8"↑", ht);
     }
 
-    /* Persist state when rates were recomputed or the battery name was just
-     * (re)discovered; the burst reuse path writes nothing.                  */
-    if (recomputed || memcmp(oldbat, rates.bat, sizeof oldbat) != 0)
+    {
+        time_t tt = time(NULL);
+        struct tm tmv;
+        char dtbuf[32];
+        if (localtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%b %-d %H:%M", &tmv)) {
+            SYS_SEP();
+            sb_c(&sys_, DIM, "%s", dtbuf);
+            sb_raw(&sys_, " ");
+            sb_c(&sys_, DIM, "%s", G->sessions);
+            ICON_SEP();
+            sb_c(&sys_, DIM, "%d", rates.sessions);
+        }
+    }
+
+    /* Persist state when rates were recomputed, the battery name was just
+     * (re)discovered, or the full-charge tracking changed; the burst reuse
+     * path writes nothing otherwise.                                        */
+    if (recomputed || memcmp(oldbat, rates.bat, sizeof oldbat) != 0 ||
+        rates.full_ts != old_full_ts || rates.tainted != old_tainted ||
+        rates.was_charging != old_was_charging)
         state_save(sfile, &rates);
 
     /* --- assemble and emit in a single write(): segments joined by dim │,

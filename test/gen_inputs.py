@@ -20,7 +20,8 @@ w("a_real.json", {
     "model": {"display_name": "Opus 4.8", "id": "claude-opus-4-8"},
     "workspace": {"current_dir": "/home/amr/.claude", "project_dir": "/home/amr"},
     "cwd": "/home/amr/.claude",
-    "context_window": {"used_percentage": 18},
+    "context_window": {"used_percentage": 18, "context_window_size": 200000},
+    "effort": {"level": "high"},
     "rate_limits": {
         "five_hour": {"used_percentage": 2, "resets_at": int(now) + 2*3600 + 42*60 + 30},
         "seven_day": {"used_percentage": 3, "resets_at": int(now) + 31*3600 + 30},
@@ -36,6 +37,7 @@ w("b_dirs.json", {
         "project_dir": "/home/amr/tickets/PHPG1138-305",
     },
     "context_window": {"used_percentage": 55},
+    "effort": {"level": "low"},
 })
 
 # (c) free tier: no rate_limits, no context_window
@@ -64,12 +66,13 @@ w("f_iso.json", {
     },
 })
 
-# (g) threshold edges: ctx 80 red, 5h 79 amber, 7d 80 red
+# (g) threshold edges: ctx 80 red, 5h 79 amber, 7d 80 red; extended 1M context
 w("g_edges.json", {
     "session_id": "parity-g",
     "model": {"id": "claude-fable-5"},   # no display_name -> id fallback
     "workspace": {"current_dir": "/home/amr", "project_dir": "/home/amr"},
-    "context_window": {"used_percentage": 80},
+    "context_window": {"used_percentage": 80, "context_window_size": 1000000},
+    "effort": {"level": "xhigh"},
     "rate_limits": {
         "five_hour": {"used_percentage": 79, "resets_at": int(now) + 8*60 + 30},
         "seven_day": {"used_percentage": 80},   # no resets_at -> "?"
@@ -81,6 +84,7 @@ w("h_edge2.json", {
     "session_id": "parity-h",
     "workspace": {"current_dir": "/home/amr/x", "project_dir": "/home/amr/x"},
     "context_window": {"used_percentage": 70},
+    "effort": {"level": "medium"},
 })
 
 # (i) JSON torture: escapes incl. \uXXXX + surrogate pair, arrays and unknown
@@ -92,6 +96,7 @@ w("i_torture.json", {
     "workspace": {"current_dir": "/home/amr/café 🚀/dir",
                   "project_dir": "/home/amr/café 🚀/dir"},
     "context_window": {"used_percentage": 1.8e1},
+    "effort": {"level": "max"},
     "rate_limits": {
         "five_hour": {"used_percentage": 7.9e1, "resets_at": (int(now) + 3600 + 30) * 1000.0},
         "seven_day": {"used_percentage": 3, "resets_at": int(now) + 2*86400 + 30},
@@ -101,4 +106,13 @@ w("i_torture.json", {
 
 # (j) truncated JSON must be rejected whole (renders like empty input)
 w("j_truncated.json", '{"model":{"display_name":"Half')
+
+# (k) unrecognized effort level (pass-through) + sub-1000 and mid-K token counts
+w("k_effort.json", {
+    "session_id": "parity-k",
+    "model": {"display_name": "Sonnet 5"},
+    "workspace": {"current_dir": "/home/amr", "project_dir": "/home/amr"},
+    "context_window": {"used_percentage": 5, "context_window_size": 999},
+    "effort": {"level": "turbo"},
+})
 print("inputs generated")
