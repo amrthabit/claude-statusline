@@ -20,6 +20,7 @@
 #include <math.h>
 #include <time.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/statvfs.h>
 #include "vendor/cJSON.h"
@@ -449,9 +450,19 @@ static double now_monotonicish(void) {
     return (double)tp.tv_sec + tp.tv_nsec / 1e9;
 }
 
+/* State goes to RAM-backed tmpfs, never disk: XDG_RUNTIME_DIR (user-private,
+ * auto-wiped at logout), else /dev/shm. ~/.claude/cache is the last resort
+ * on exotic systems with neither.                                           */
+static void state_dir(char *dst, size_t cap) {
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    if (rt && *rt && access(rt, W_OK) == 0) { snprintf(dst, cap, "%s", rt); return; }
+    if (access("/dev/shm", W_OK) == 0)      { snprintf(dst, cap, "/dev/shm"); return; }
+    snprintf(dst, cap, "%s/.claude/cache", HOME);
+}
+
 static void state_file(const cJSON *root, char *dst, size_t cap) {
     const char *sid = jstr(jget(root, "session_id"));
-    char clean[65];
+    char clean[65], dir[256];
     size_t j = 0;
     if (sid) {
         for (size_t i = 0; sid[i] && j < 64; i++) {
@@ -463,7 +474,8 @@ static void state_file(const cJSON *root, char *dst, size_t cap) {
     }
     clean[j] = 0;
     if (!j) snprintf(clean, sizeof clean, "default");
-    snprintf(dst, cap, "%s/.claude/cache/statusline-state-%s.dat", HOME, clean);
+    state_dir(dir, sizeof dir);
+    snprintf(dst, cap, "%s/claude-statusline-state-%s.dat", dir, clean);
 }
 
 static void state_load(const char *path, State *s) {
@@ -485,8 +497,12 @@ static void state_load(const char *path, State *s) {
 static void state_save(const char *path, const State *s) {
     char tmp[640];   /* path buffer (600) + ".tmp" */
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    FILE *f = fopen(tmp, "w");
-    if (!f) return;
+    /* O_EXCL: never follow a pre-existing symlink (matters for /dev/shm) */
+    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) { unlink(tmp); fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600); }
+    if (fd < 0) return;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); return; }
     fprintf(f, "%.6f %d %lld %lld %d %lld %lld %d %lld %lld %.17g %.17g %.17g %.17g %.17g\n",
             s->ts, s->has_cpu, s->ct, s->ci, s->has_net, s->rx, s->tx,
             s->has_io, s->ior, s->iow,

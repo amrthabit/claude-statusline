@@ -12,17 +12,23 @@ FAIL=0
 python3 test/gen_inputs.py test/inputs >/dev/null
 
 # cold state for every case, both formats
-rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-parity-*.dat \
-      ~/.claude/cache/statusline-state-default.json ~/.claude/cache/statusline-state-default.dat
+rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-default.json \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-parity-*.dat \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-default.dat \
+      /dev/shm/claude-statusline-state-parity-*.dat /dev/shm/claude-statusline-state-default.dat
 
 for f in test/inputs/*.json; do
   name=$(basename "$f")
   # run back-to-back to minimize clock skew; delete state between so BOTH are cold
-  rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-parity-*.dat \
-      ~/.claude/cache/statusline-state-default.json ~/.claude/cache/statusline-state-default.dat
+  rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-default.json \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-parity-*.dat \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-default.dat \
+      /dev/shm/claude-statusline-state-parity-*.dat /dev/shm/claude-statusline-state-default.dat
   out_py=$($PY < "$f")
-  rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-parity-*.dat \
-      ~/.claude/cache/statusline-state-default.json ~/.claude/cache/statusline-state-default.dat
+  rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-default.json \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-parity-*.dat \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-default.dat \
+      /dev/shm/claude-statusline-state-parity-*.dat /dev/shm/claude-statusline-state-default.dat
   out_c=$($BIN < "$f")
   if [ "$out_py" == "$out_c" ]; then
     echo "PASS  $name"
@@ -35,6 +41,8 @@ for f in test/inputs/*.json; do
   fi
 done
 
-rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-parity-*.dat \
-      ~/.claude/cache/statusline-state-default.json ~/.claude/cache/statusline-state-default.dat
+rm -f ~/.claude/cache/statusline-state-parity-*.json ~/.claude/cache/statusline-state-default.json \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-parity-*.dat \
+      "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-default.dat \
+      /dev/shm/claude-statusline-state-parity-*.dat /dev/shm/claude-statusline-state-default.dat
 exit $FAIL
