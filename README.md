@@ -7,31 +7,32 @@ prints one color-coded line in ~**0.7 ms**.
 ![statusline](docs/statusline-full.png)
 
 ```
- launch ›  current │ Model ctx% 5h%reset 7d%reset │ BAT RAM CPU DISK IO NET
+ user@host:launch › current │ Model effort ctx%size 5h%reset 7d%reset │ BAT RAM CPU°temp DISK IO NET date session#
 ```
 
 ## Features
 
-- **Directories**: launch and current dir, `~`-shortened and elided; collapsed when equal
-- **Model + context**: active model name and context-window usage %
+- **Directories**: `user@host:` prefix, launch and current dir, `~`-shortened; collapsed when equal
+- **Model + context**: active model name, reasoning-effort level, context-window usage % and max size (`18%200K`)
 - **Plan usage**: 5h and 7d windows with reset countdowns (`20%4h9m`); subscribers only
-- **Battery**: charge % with a level glyph; distinct glyph while charging
-- **RAM & disk**: used % plus free space (`53%3.7G`)
-- **CPU, disk IO, network**: true rates from `/proc` deltas, tracked per session without collisions
-- **Zero disk writes**: state (~100 bytes/session) lives in tmpfs (`$XDG_RUNTIME_DIR`), vanishes at logout
+- **Battery**: charge % with a level glyph, distinct while charging; time since full (`3h20m`), hidden while charging or after a partial recharge
+- **RAM, disk & CPU**: used % plus free space or package temperature (`53%3.7G`, `12%45°C`)
+- **Disk IO, network**: true rates from `/proc` deltas, tracked per session without collisions
+- **Date, time & sessions**: local clock plus a live count of other open Claude Code sessions
+- **Zero disk writes**: state (~100 bytes/session) lives in tmpfs (`$XDG_RUNTIME_DIR`), vanishes at logout; stale sessions' state self-cleans after 5 minutes
 - **Color as the signal**: green/amber/red at 70/80%; battery inverted; IO/net at 10/30MiB/s
 - **Never breaks a render**: malformed stdin, missing fields, unreadable `/proc`: segments fail soft
 - **Self-contained**: one `.c` file, nothing beyond libc; the JSON reader is ~180 lines of it
-- **Lean by measurement**: 19 syscalls, zero allocations, zero writes per render
+- **Lean by measurement**: ~19-27 syscalls depending on enabled segments, zero allocations, zero writes at steady state
 
 Built for a **Linux laptop** on a **Claude subscription**. Desktops, VMs, and
 API-key billing still work: the missing segments just disappear.
 
 ## Prerequisites
 
-- Linux with `/proc` and `/sys`; battery needs `/sys/class/power_supply/BAT*`
+- Linux with `/proc` and `/sys`; battery needs `/sys/class/power_supply/BAT*`, CPU temp needs an `x86_pkg_temp` thermal zone (Intel)
 - `gcc`, `make`, libc headers (`sudo apt install gcc make libc6-dev`); optional `musl-tools` for ~10× faster init
-- A Nerd Font (v3) for glyphs, or `CLAUDE_STATUSLINE_NERD=0` for plain text
+- A Nerd Font (v3) **Mono** variant for glyphs (the regular variant overflows its cell by up to 39% on some icons), or `CLAUDE_STATUSLINE_NERD=0` for plain text
 - `make test` also needs `python3` and `bash`
 
 ## Build & deploy

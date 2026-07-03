@@ -2,12 +2,24 @@
 # Byte-for-byte parity: python reference vs C binary, on freshly generated
 # inputs, with cold per-case state (fresh session ids ensure no rate segments,
 # keeping output deterministic modulo the /proc/loadavg 5s tick).
+#
+# Two fields are normalized before comparing (see `normalize` below), not
+# byte-for-byte by nature rather than by bug: CPU package temp is read live
+# with no state gating, so it can visibly shift between the two back-to-back
+# calls; the active-session count depends on each implementation's own state
+# directory (tmpfs for the C binary, ~/.claude/cache for the Python
+# reference), whose real current contents differ regardless of the fixture.
 set -u
 cd "$(dirname "$0")/.."
 
 PY="python3 -SE statusline.py"
 BIN="./statusline-bin"
 FAIL=0
+ESC=$'\x1b'
+
+normalize() {
+  sed -E "s/[0-9]+°C/N°C/g; s/(${ESC}\[2m)[0-9]+(${ESC}\[0m)\$/\1N\2/"
+}
 
 python3 test/gen_inputs.py test/inputs >/dev/null
 
@@ -30,7 +42,9 @@ for f in test/inputs/*.json; do
       "${XDG_RUNTIME_DIR:-/dev/shm}"/claude-statusline-state-default.dat \
       /dev/shm/claude-statusline-state-parity-*.dat /dev/shm/claude-statusline-state-default.dat
   out_c=$($BIN < "$f")
-  if [ "$out_py" == "$out_c" ]; then
+  norm_py=$(printf '%s' "$out_py" | normalize)
+  norm_c=$(printf '%s' "$out_c" | normalize)
+  if [ "$norm_py" == "$norm_c" ]; then
     echo "PASS  $name"
   else
     echo "FAIL  $name"
