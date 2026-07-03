@@ -8,17 +8,13 @@ CFLAGS  = -O2 -Wall -Wextra -std=c11
 LDFLAGS = -static
 LDLIBS  = -lm
 
-statusline-bin: statusline.c vendor/cJSON.o
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ statusline.c vendor/cJSON.o $(LDLIBS)
-
-# vendored code built without -Wextra (not ours to lint)
-vendor/cJSON.o: vendor/cJSON.c vendor/cJSON.h
-	$(CC) -O2 -std=c11 -c -o $@ vendor/cJSON.c
+statusline-bin: statusline.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ statusline.c $(LDLIBS)
 
 test: statusline-bin
 	bash test/parity.sh
 
 clean:
-	rm -f statusline-bin vendor/cJSON.o
+	rm -f statusline-bin
 
 .PHONY: test clean

@@ -82,4 +82,23 @@ w("h_edge2.json", {
     "workspace": {"current_dir": "/home/amr/x", "project_dir": "/home/amr/x"},
     "context_window": {"used_percentage": 70},
 })
+
+# (i) JSON torture: escapes incl. \uXXXX + surrogate pair, arrays and unknown
+# nesting to skip over, exponent-form numbers. json.dumps escapes non-ASCII
+# by default, exercising the C decoder's \u path.
+w("i_torture.json", {
+    "session_id": "parity-i",
+    "model": {"display_name": "Opüs \"4.8\" ⚡", "extra": [1, [2, {"x": []}], None, True]},
+    "workspace": {"current_dir": "/home/amr/café 🚀/dir",
+                  "project_dir": "/home/amr/café 🚀/dir"},
+    "context_window": {"used_percentage": 1.8e1},
+    "rate_limits": {
+        "five_hour": {"used_percentage": 7.9e1, "resets_at": (int(now) + 3600 + 30) * 1000.0},
+        "seven_day": {"used_percentage": 3, "resets_at": int(now) + 2*86400 + 30},
+    },
+    "unknown_deeply": {"a": {"b": [[[{"c": "d\\e"}]]]}},
+})
+
+# (j) truncated JSON must be rejected whole (renders like empty input)
+w("j_truncated.json", '{"model":{"display_name":"Half')
 print("inputs generated")
