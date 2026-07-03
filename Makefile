@@ -2,10 +2,12 @@
 # binary spawned every second. Byte-for-byte parity verified (make test).
 # Falls back to gcc when musl-tools isn't installed.
 CC      := $(shell command -v musl-gcc >/dev/null 2>&1 && echo musl-gcc || echo gcc)
-CFLAGS  = -O2 -Wall -Wextra -std=c11
+CFLAGS  = -O2 -Wall -Wextra -std=c11 -ffunction-sections -fdata-sections
+LDFLAGS += -Wl,--gc-sections
 # Static: skips the dynamic linker at every render (~0.5ms).
-# Safe here - no NSS/DNS/locale use. `make LDFLAGS=` for a dynamic build.
-LDFLAGS = -static
+# Safe here - no NSS/DNS/locale use. `make STATIC=` for a dynamic build.
+STATIC  = -static
+LDFLAGS += $(STATIC)
 LDLIBS  = -lm
 
 statusline-bin: statusline.c
