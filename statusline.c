@@ -1219,7 +1219,7 @@ int main(void) {
         time_t tt = time(NULL);
         struct tm tmv;
         char dtbuf[32];
-        if (localtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%b %-d %H:%M", &tmv)) {
+        if (localtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%-d%b%H:%M", &tmv)) {
             SYS_SEP();
             sb_c(&sys_, DIM, "%s", dtbuf);
             sb_raw(&sys_, " ");
