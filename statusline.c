@@ -133,8 +133,9 @@ static const char *bat_color(int pct, bool charging) {
     if (pct <= 30) return YLW;
     return GRN;
 }
-static const char *bat_glyph(int pct) {
+static const char *bat_glyph(int pct, bool charging) {
     if (!NERD) return G->bat;
+    if (charging) return u8"\U000F0084";   /* md battery-charging */
     int idx = pct >= 88 ? 0 : pct >= 63 ? 1 : pct >= 38 ? 2 : pct >= 13 ? 3 : 4;
     return BAT_RAMP[idx];
 }
@@ -926,9 +927,9 @@ int main(void) {
     if (read_battery(rates.bat, sizeof rates.bat, &bpct, &bchg)) {
         SYS_SEP();
         const char *bc = bat_color(bpct, bchg);
-        sb_c(&sys_, bc, "%s", bat_glyph(bpct));
+        sb_c(&sys_, bc, "%s", bat_glyph(bpct, bchg));
         sb_raw(&sys_, " ");
-        sb_c(&sys_, bc, "%d%%%s", bpct, bchg ? u8"⚡" : "");
+        sb_c(&sys_, bc, "%d%%", bpct);
     }
 
     double ram_pct, ram_free;

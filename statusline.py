@@ -213,6 +213,8 @@ def read_battery():
 def bat_glyph(pct, charging):
     if not NERD:
         return G["bat"]                      # "BAT"
+    if charging:
+        return chr(0xF0084)                  # md battery-charging
     # Font Awesome battery ramp: U+F240 full .. U+F244 empty (safe FA core range)
     idx = 0 if pct >= 88 else 1 if pct >= 63 else 2 if pct >= 38 else 3 if pct >= 13 else 4
     return chr(0xF240 + idx)
@@ -440,9 +442,8 @@ def main():
     bat_pct, bat_chg = read_battery()
     if bat_pct is not None:
         bcol = bat_color(bat_pct, bat_chg)
-        bolt = "⚡" if bat_chg else ""   # ⚡ when charging
         sysparts.append(c(bat_glyph(bat_pct, bat_chg), bcol) + " " +
-                        c(f"{bat_pct}%{bolt}", bcol))
+                        c(f"{bat_pct}%", bcol))
 
     ram_pct, ram_free = read_mem()
     if ram_pct is not None:
