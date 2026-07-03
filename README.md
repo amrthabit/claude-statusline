@@ -32,7 +32,7 @@ API-key billing still work: the missing segments just disappear.
 
 - Linux with `/proc` and `/sys`; battery needs `/sys/class/power_supply/BAT*`, CPU temp needs an `x86_pkg_temp` thermal zone (Intel)
 - `gcc`, `make`, libc headers (`sudo apt install gcc make libc6-dev`); optional `musl-tools` for ~10× faster init
-- A Nerd Font (v3) **Mono** variant for glyphs (the regular variant overflows its cell by up to 39% on some icons), or `CLAUDE_STATUSLINE_NERD=0` for plain text
+- A Nerd Font (v3) **Mono** variant for glyphs (the regular variant overflows its cell by up to 39% on some icons), or `CLAUDE_STATUSLINE_NERD=0` for plain text; see [docs/fonts.md](docs/fonts.md) for the recommended font and a Windows Terminal example
 - `make test` also needs `python3` and `bash`
 
 ## Build & deploy
@@ -56,6 +56,12 @@ Then point `statusLine` at the binary in `~/.claude/settings.json`:
 ## Tuning
 
 Thresholds are `#define`s in the CONFIG block atop `statusline.c`. Change, `make`, done.
+
+Environment toggles:
+
+- `CLAUDE_STATUSLINE_NERD=0`: plain-text labels instead of Nerd Font glyphs
+- `CLAUDE_STATUSLINE_BATTERY=0`: hide the battery segment (for desktops/VMs with a phantom/synthetic ACPI battery)
+- `CLAUDE_STATUSLINE_SERVICES=<path>`: path to the optional [services segment](docs/services.md) config (default: `services.conf` next to the binary)
 
 ## Local preview + profiling
 

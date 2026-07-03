@@ -17,8 +17,11 @@ BIN="./statusline-bin"
 FAIL=0
 ESC=$'\x1b'
 
+# Trailing session count is the last field on the line (...<count>\033[0m); it
+# differs between the two implementations' state dirs, so mask it. (Intensity
+# is flattened, so it is no longer wrapped in a \033[2m marker to anchor on.)
 normalize() {
-  sed -E "s/[0-9]+°C/N°C/g; s/(${ESC}\[2m)[0-9]+(${ESC}\[0m)\$/\1N\2/"
+  sed -E "s/[0-9]+°C/N°C/g; s/[0-9]+(${ESC}\[0m)\$/N\1/"
 }
 
 python3 test/gen_inputs.py test/inputs >/dev/null

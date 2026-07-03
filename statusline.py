@@ -40,13 +40,22 @@ RATE_MIN_INTERVAL = 1.0
 RATE_WARN = 10 * 1024 * 1024      # 10 MiB/s
 RATE_BAD  = 30 * 1024 * 1024      # 30 MiB/s
 
+# Minimum seconds between `systemctl is-active` sweeps for the optional
+# services segment. Liveness changes slowly, so a stale cache stays correct;
+# this keeps us from forking systemctl on every render.
+SVC_MIN_INTERVAL = 15.0
+
 SEP = "  "                        # segment separator
 # ----------------------------------------------------------------------------
 
 # ANSI
+# Intensity is flattened: DIM (faint, \033[2m) and BOLD (\033[1m) are
+# neutralized to a single normal weight - some terminals render the faint/bold
+# spread too harshly, so every segment shows at one intensity and color hue is
+# the only signal. Restore "\033[2m"/"\033[1m" here to bring the spread back.
 R   = "\033[0m"
-DIM = "\033[2m"
-BOLD= "\033[1m"
+DIM = ""
+BOLD= ""
 GRN = "\033[32m"
 YLW = "\033[33m"
 RED = "\033[31m"
@@ -214,7 +223,12 @@ def dig(d, *path, default=None):
 
 # ------------------------------------------------------------ /proc read ----
 def read_battery():
-    """Return (percent, charging) or (None, None) if no battery."""
+    """Return (percent, charging) or (None, None) if no battery. Set
+    CLAUDE_STATUSLINE_BATTERY=0 to force-hide the segment on machines with a
+    phantom/synthetic battery (Hyper-V and other VMs pass through an ACPI
+    battery node that reads a static charge with status 'Unknown')."""
+    if os.environ.get("CLAUDE_STATUSLINE_BATTERY", "1") == "0":
+        return None, None
     base = None
     psdir = "/sys/class/power_supply"
     try:
@@ -455,6 +469,124 @@ def rate_metrics(state):
     }
     return rates, new_state
 
+# ------------------------------------------------------------- services ----
+# Optional, opt-in "stack health" segment: one colored dot per service, green
+# when the systemd unit is active, red otherwise. Driven by a gitignored
+# config file (one `label unit [icon]` line each). No config file -> the
+# segment is omitted entirely, so anyone without one pays nothing. Liveness is
+# a single cached `systemctl is-active` for all units at once, refreshed at
+# most every SVC_MIN_INTERVAL through a shared tmpfs cache, so a burst of
+# renders never forks systemctl.
+
+def state_dir():
+    """RAM-backed dir, chosen identically to the C port so the services cache
+    round-trips byte-for-byte between them."""
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if rt and os.access(rt, os.W_OK):
+        return rt
+    if os.access("/dev/shm", os.W_OK):
+        return "/dev/shm"
+    return CACHE_DIR
+
+def services_config_path():
+    p = os.environ.get("CLAUDE_STATUSLINE_SERVICES")
+    if p:
+        return p
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "services.conf")
+
+def decode_icon(tok):
+    """'U+F013' / '0xF013' -> the glyph; any other token is a literal glyph."""
+    if len(tok) > 2 and tok[0] in "Uu" and tok[1] == "+":
+        try: return chr(int(tok[2:], 16))
+        except ValueError: return tok
+    if len(tok) > 2 and tok[0] == "0" and tok[1] in "xX":
+        try: return chr(int(tok[2:], 16))
+        except ValueError: return tok
+    return tok
+
+def load_services():
+    """Parse the config into [(label, unit, icon_glyph)]; [] if no file."""
+    out = []
+    try:
+        with open(services_config_path()) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                icon = decode_icon(parts[2]) if len(parts) >= 3 else ""
+                out.append((parts[0], parts[1], icon))
+    except OSError:
+        return []
+    return out
+
+def svc_cache_path():
+    return os.path.join(state_dir(), "claude-statusline-svc.dat")
+
+def load_svc_cache():
+    """-> (ts, {unit: active_bool}); (0, {}) if absent/unparseable."""
+    try:
+        with open(svc_cache_path()) as f:
+            parts = f.read().split()
+    except OSError:
+        return 0.0, {}
+    if not parts:
+        return 0.0, {}
+    try:
+        ts = float(parts[0])
+    except ValueError:
+        return 0.0, {}
+    m = {}
+    for tok in parts[1:]:
+        unit, sep, st = tok.rpartition(":")
+        if sep:
+            m[unit] = (st == "1")
+    return ts, m
+
+def save_svc_cache(pairs):
+    line = ("%.6f " % time.time()) + " ".join("%s:%d" % (u, 1 if a else 0) for u, a in pairs)
+    path = svc_cache_path()
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(line + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+def query_services(units):
+    """One `systemctl is-active u...` for all units -> [bool] by index. Any
+    failure (no systemd, exec error, timeout) reads as all-down."""
+    import subprocess
+    try:
+        p = subprocess.run(["systemctl", "is-active", *units],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=2)
+        lines = p.stdout.decode("utf-8", "replace").splitlines()
+    except Exception:
+        lines = []
+    return [i < len(lines) and lines[i].strip() == "active" for i in range(len(units))]
+
+def services_segment():
+    svcs = load_services()
+    if not svcs:
+        return None
+    units = [u for _, u, _ in svcs]
+    ts, cache = load_svc_cache()
+    now = time.time()
+    if 0 <= now - ts < SVC_MIN_INTERVAL and all(u in cache for u in units):
+        states = [cache[u] for u in units]
+    else:
+        states = query_services(units)
+        save_svc_cache(list(zip(units, states)))
+    parts = []
+    for (label, unit, icon), active in zip(svcs, states):
+        text = icon if (NERD and icon) else label
+        parts.append(c(text, GRN if active else RED))
+    return " ".join(parts)
+
 # ----------------------------------------------------------------- main ----
 def main():
     raw = sys.stdin.read()
@@ -526,6 +658,11 @@ def main():
         if s:
             mid.append(s)
     segs.append(" ".join(mid))
+
+    # --- services (optional, opt-in via services.conf) ---
+    svc = services_segment()
+    if svc:
+        segs.append(svc)
 
     # --- system metrics ---
     sfile = state_path(data.get("session_id"))

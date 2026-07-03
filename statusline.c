@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 /* ---------------------------------------------------------------- CONFIG -- */
 /* Color thresholds (percent). >=WARN -> amber, >=BAD -> red, else green.    */
@@ -47,6 +48,12 @@
 
 #define PATH_MAXLEN 30   /* dir display length before middle-elision */
 
+/* Optional services segment: max units, and the minimum seconds between
+ * `systemctl is-active` sweeps (liveness changes slowly, so a stale cache
+ * stays correct - this just avoids forking systemctl on every render).      */
+#define MAX_SVC 16
+#define SVC_MIN_INTERVAL 15.0
+
 /* A session counts as "active" if its state file was touched within this
  * many seconds - matches refreshInterval:1 polling with margin for jitter,
  * so a closed session (no longer being rendered) drops out quickly.        */
@@ -54,9 +61,13 @@
 /* -------------------------------------------------------------------------- */
 
 /* ANSI */
+/* Intensity is flattened: DIM (faint, \033[2m) and BOLD (\033[1m) are
+ * neutralized to a single normal weight - some terminals render the faint/bold
+ * spread too harshly, so every segment shows at one intensity and color hue is
+ * the only signal. Restore "\033[2m"/"\033[1m" here to bring the spread back. */
 #define RST  "\033[0m"
-#define DIM  "\033[2m"
-#define BOLD "\033[1m"
+#define DIM  ""
+#define BOLD ""
 #define GRN  "\033[32m"
 #define YLW  "\033[33m"
 #define RED  "\033[31m"
@@ -509,6 +520,11 @@ static const char *next_line(const char *p) {
 struct State;
 static bool read_battery(char *bat, size_t batcap, int *pct, bool *charging) {
     char path[352], buf[64];
+    /* CLAUDE_STATUSLINE_BATTERY=0 force-hides the segment on machines with a
+     * phantom/synthetic battery (Hyper-V and other VMs pass through an ACPI
+     * battery node that reads a static charge with status "Unknown"). */
+    const char *be = getenv("CLAUDE_STATUSLINE_BATTERY");
+    if (be && !strcmp(be, "0")) return false;
     if (!strcmp(bat, "-")) return false;
     if (bat[0]) {
         snprintf(path, sizeof path, "/sys/class/power_supply/%s/capacity", bat);
@@ -954,6 +970,222 @@ static bool rate_metrics(State *st) {
     return true;
 }
 
+/* -------------------------------------------------------------- services -- */
+/* Optional, opt-in "stack health" segment: one colored dot per service, green
+ * when the systemd unit is active, red otherwise. Driven by a gitignored
+ * config file ($CLAUDE_STATUSLINE_SERVICES, else services.conf next to the
+ * binary) with one `label unit [icon]` line each. No config file -> the
+ * segment (and every fork/write below) is skipped. Liveness is a single
+ * cached `systemctl is-active` for all units, refreshed at most every
+ * SVC_MIN_INTERVAL through a tmpfs cache shared with the Python reference so
+ * the two stay byte-identical.                                              */
+typedef struct { char label[64]; char unit[128]; char icon[32]; } Svc;
+
+static void cp_to_utf8(unsigned cp, char *dst) {
+    size_t j = 0;
+    if (cp < 0x80) dst[j++] = (char)cp;
+    else if (cp < 0x800) {
+        dst[j++] = (char)(0xC0 | cp >> 6);
+        dst[j++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        dst[j++] = (char)(0xE0 | cp >> 12);
+        dst[j++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        dst[j++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        dst[j++] = (char)(0xF0 | cp >> 18);
+        dst[j++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        dst[j++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        dst[j++] = (char)(0x80 | (cp & 0x3F));
+    }
+    dst[j] = 0;
+}
+
+/* "U+F013" / "0xF013" -> glyph; any other token is a literal glyph. */
+static void decode_icon(const char *tok, char *dst, size_t cap) {
+    if (!tok || !tok[0]) { dst[0] = 0; return; }
+    unsigned cp;
+    if ((tok[0] == 'U' || tok[0] == 'u') && tok[1] == '+' &&
+        sscanf(tok + 2, "%x", &cp) == 1) { cp_to_utf8(cp, dst); return; }
+    if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X') &&
+        sscanf(tok + 2, "%x", &cp) == 1) { cp_to_utf8(cp, dst); return; }
+    snprintf(dst, cap, "%s", tok);
+}
+
+static int load_services(Svc *out, int maxn) {
+    char path[1088];   /* exe dir (<=1024) + "/services.conf" */
+    const char *env = getenv("CLAUDE_STATUSLINE_SERVICES");
+    if (env && env[0]) {
+        snprintf(path, sizeof path, "%s", env);
+    } else {
+        char exe[1024];
+        ssize_t r = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (r <= 0) return 0;
+        exe[r] = 0;
+        char *slash = strrchr(exe, '/');
+        if (!slash) return 0;
+        *slash = 0;
+        snprintf(path, sizeof path, "%s/services.conf", exe);
+    }
+    char buf[8192];
+    if (rdfile(path, buf, sizeof buf) <= 0) return 0;
+    int n = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line && n < maxn;
+         line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line || *line == '#') continue;
+        char l[64] = "", u[128] = "", ic[64] = "";
+        if (sscanf(line, "%63s %127s %63s", l, u, ic) < 2) continue;
+        snprintf(out[n].label, sizeof out[n].label, "%s", l);
+        snprintf(out[n].unit, sizeof out[n].unit, "%s", u);
+        decode_icon(ic, out[n].icon, sizeof out[n].icon);
+        n++;
+    }
+    return n;
+}
+
+/* fork/exec argv, capture stdout into buf. Returns bytes read, -1 on failure.
+ * The only subprocess spawn in the whole program - gated behind a configured
+ * services file and the SVC_MIN_INTERVAL cache.                             */
+static int run_capture(char *const argv[], char *buf, size_t cap) {
+    int pfd[2];
+    if (pipe(pfd) != 0) return -1;
+    pid_t pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        close(pfd[0]);
+        dup2(pfd[1], 1);
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 2); if (dn > 2) close(dn); }
+        if (pfd[1] > 1) close(pfd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    size_t len = 0;
+    for (;;) {
+        ssize_t n = read(pfd[0], buf + len, cap - 1 - len);
+        if (n <= 0) break;
+        len += (size_t)n;
+        if (len >= cap - 1) break;
+    }
+    close(pfd[0]);
+    int status;
+    waitpid(pid, &status, 0);
+    buf[len] = 0;
+    return (int)len;
+}
+
+/* `systemctl is-active` for all units at once; states[i] matches units[i]
+ * (one output line per arg, in order). Any exec failure -> all false. */
+static void query_services(char units[][128], int n, bool *states) {
+    char *argv[MAX_SVC + 3];
+    int a = 0;
+    argv[a++] = (char *)"systemctl";
+    argv[a++] = (char *)"is-active";
+    for (int i = 0; i < n; i++) argv[a++] = units[i];
+    argv[a] = NULL;
+    char out[4096];
+    int len = run_capture(argv, out, sizeof out);
+    const char *p = (len > 0) ? out : NULL;
+    for (int i = 0; i < n; i++) {
+        states[i] = false;
+        if (!p) continue;
+        while (*p == ' ' || *p == '\t') p++;
+        const char *nl = strchr(p, '\n');
+        size_t ll = nl ? (size_t)(nl - p) : strlen(p);
+        while (ll > 0 && (p[ll - 1] == ' ' || p[ll - 1] == '\r')) ll--;
+        states[i] = (ll == 6 && !strncmp(p, "active", 6));
+        p = nl ? nl + 1 : NULL;
+    }
+}
+
+static void svc_cache_path(char *dst, size_t cap) {
+    char dir[256];
+    state_dir(dir, sizeof dir);
+    snprintf(dst, cap, "%s/claude-statusline-svc.dat", dir);
+}
+
+/* Load "ts unit:state ..." into parallel arrays; returns ts (0 if absent). */
+static double svc_cache_load(char cunit[][128], bool *cstate, int *cn, int maxn) {
+    char path[512];
+    svc_cache_path(path, sizeof path);
+    char buf[4096];
+    *cn = 0;
+    if (rdfirst(path, buf, sizeof buf) <= 0) return 0.0;
+    char *e;
+    const char *p = buf;
+    double ts = strtod(p, &e);
+    if (e == p) return 0.0;
+    p = e;
+    while (*cn < maxn) {
+        while (*p == ' ' || *p == '\n') p++;
+        if (!*p) break;
+        const char *tok = p;
+        while (*p && *p != ' ' && *p != '\n') p++;
+        const char *colon = NULL;
+        for (const char *q = tok; q < p; q++) if (*q == ':') colon = q;
+        if (!colon) continue;
+        size_t ul = (size_t)(colon - tok);
+        if (ul == 0 || ul >= 128) continue;
+        memcpy(cunit[*cn], tok, ul);
+        cunit[*cn][ul] = 0;
+        cstate[*cn] = (colon[1] == '1');
+        (*cn)++;
+    }
+    return ts;
+}
+
+static void svc_cache_save(char units[][128], const bool *states, int n) {
+    char path[512];
+    svc_cache_path(path, sizeof path);
+    char buf[4096];
+    int len = snprintf(buf, sizeof buf, "%.6f", now_monotonicish());
+    for (int i = 0; i < n && len < (int)sizeof buf - 160; i++)
+        len += snprintf(buf + len, sizeof buf - (size_t)len,
+                        " %s:%d", units[i], states[i] ? 1 : 0);
+    if (len < (int)sizeof buf - 1) { buf[len++] = '\n'; buf[len] = 0; }
+    char tmp[540];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) { unlink(tmp); fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0600); }
+    if (fd < 0) return;
+    bool ok = write(fd, buf, (size_t)len) == len;
+    close(fd);
+    if (ok) rename(tmp, path); else unlink(tmp);
+}
+
+/* Build the services segment into `dst`; leaves it empty when no config. */
+static void services_segment(SB *dst) {
+    Svc list[MAX_SVC];
+    int n = load_services(list, MAX_SVC);
+    if (n <= 0) return;
+
+    char cunit[MAX_SVC][128]; bool cstate[MAX_SVC]; int cn = 0;
+    double ts = svc_cache_load(cunit, cstate, &cn, MAX_SVC);
+    double age = now_monotonicish() - ts;
+    bool states[MAX_SVC];
+    bool fresh = age >= 0 && age < SVC_MIN_INTERVAL;
+    for (int i = 0; fresh && i < n; i++) {
+        bool found = false;
+        for (int j = 0; j < cn; j++)
+            if (!strcmp(cunit[j], list[i].unit)) { states[i] = cstate[j]; found = true; break; }
+        if (!found) fresh = false;
+    }
+    if (!fresh) {
+        char units[MAX_SVC][128];
+        for (int i = 0; i < n; i++) snprintf(units[i], sizeof units[i], "%s", list[i].unit);
+        query_services(units, n, states);
+        svc_cache_save(units, states, n);
+    }
+    for (int i = 0; i < n; i++) {
+        if (i) sb_raw(dst, " ");
+        const char *col = states[i] ? GRN : RED;
+        const char *text = (NERD && list[i].icon[0]) ? list[i].icon : list[i].label;
+        sb_c(dst, col, "%s", text);
+    }
+}
+
 /* ------------------------------------------------------------------ main -- */
 /* Static stdin buffer: .bss pages fault in only as data touches them, and
  * there's no malloc/mmap churn. After the first read() we check whether we
@@ -1090,6 +1322,10 @@ int main(void) {
     if (usage_seg(rl, "seven_day", G->t7d, &seg)) {
         sb_raw(&mid, " %s", seg.buf);
     }
+
+    /* --- services (optional, opt-in via services.conf) --- */
+    SB svc = {0};
+    services_segment(&svc);
 
     /* --- system metrics --- */
     char sfile[600];
@@ -1244,6 +1480,10 @@ int main(void) {
     sb_cat(&out, dirs.buf, dirs.len);
     sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
     sb_cat(&out, mid.buf, mid.len);
+    if (svc.len) {
+        sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
+        sb_cat(&out, svc.buf, svc.len);
+    }
     if (sys_.len) {
         sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
         sb_cat(&out, sys_.buf, sys_.len);

@@ -2,3 +2,4 @@ statusline-bin
 *.o
 docs/preview-input.json
 ignored.gif
+services.conf
