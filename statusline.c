@@ -172,18 +172,19 @@ static const char *bat_glyph(int pct, bool charging) {
 /* Python round() / int(round(x)) is round-half-even; rint() matches. */
 static long iround(double x) { return (long)rint(x); }
 
-/* Bytes -> compact human string (no decimals for big units). */
+/* Bytes -> fixed 4-char string (net/disk IO only) so these fast-changing rates
+ * never reflow the statusline. Natural forms stay readable: <10 shows one
+ * decimal (1.5K), 100-999 an integer (120K, 823B). The awkward 10-99 band is
+ * two significant digits - one char short of the others - so instead of padding
+ * with a space it rolls up to a leading-dot fraction of the next unit
+ * (12K -> .01M). Rolls at 999.5 so the number is always exactly 3 chars. */
 static void human(double n, char *dst, size_t cap) {
     static const char *UNITS[] = {"B", "K", "M", "G", "T"};
-    for (int i = 0; i < 5; i++) {
-        if (n < 1024.0 || i == 4) {
-            if (i == 0)           snprintf(dst, cap, "%ld%s", (long)n, UNITS[i]);
-            else if (n < 10.0)    snprintf(dst, cap, "%.1f%s", n, UNITS[i]);
-            else                  snprintf(dst, cap, "%ld%s", iround(n), UNITS[i]);
-            return;
-        }
-        n /= 1024.0;
-    }
+    int i = 0;
+    while (n >= 999.5 && i < 4) { n /= 1024.0; i++; }
+    if (n < 9.95)              snprintf(dst, cap, "%.1f%s", n, UNITS[i]);
+    else if (n < 99.5 && i < 4) snprintf(dst, cap, ".%02ld%s", iround(n / 1024.0 * 100.0), UNITS[i + 1]);
+    else                       snprintf(dst, cap, "%.0f%s", n, UNITS[i]);
 }
 
 /* Token count -> compact decimal string (200000 -> "200K", 1000000 -> "1.0M"). */

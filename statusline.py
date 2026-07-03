@@ -119,16 +119,23 @@ else:
 
 # -------------------------------------------------------------- helpers ----
 def human(n):
-    """Bytes -> compact human string (no decimals for big units)."""
+    """Bytes -> fixed 4-char string (net/disk IO only) so these fast-changing
+    rates never reflow the statusline. Natural forms stay readable: <10 shows
+    one decimal (1.5K), 100-999 an integer (120K, 823B). The awkward 10-99 band
+    is two significant digits - one char short of the others - so instead of
+    padding with a space it rolls up to a leading-dot fraction of the next unit
+    (12K -> .01M). Rolls at 999.5 so the number is always exactly 3 chars."""
     n = float(n)
-    for unit in ("B", "K", "M", "G", "T"):
-        if n < 1024 or unit == "T":
-            if unit == "B":
-                return f"{int(n)}{unit}"
-            if n < 10:
-                return f"{n:.1f}{unit}"
-            return f"{int(round(n))}{unit}"
+    i = 0
+    units = ("B", "K", "M", "G", "T")
+    while n >= 999.5 and i < 4:
         n /= 1024.0
+        i += 1
+    if n < 9.95:
+        return f"{n:.1f}{units[i]}"
+    if n < 99.5 and i < 4:
+        return f".{round(n / 1024.0 * 100.0):02d}{units[i + 1]}"
+    return f"{n:.0f}{units[i]}"
 
 def gb(n):
     return f"{n/1e9:.1f}G"
