@@ -501,6 +501,36 @@ def services_config_path():
         return p
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "services.conf")
 
+def profile_config_path():
+    p = os.environ.get("CLAUDE_STATUSLINE_PROFILE")
+    if p:
+        return p
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile.conf")
+
+ACCENTS = {"red": RED, "green": GRN, "yellow": YLW,
+           "blue": BLU, "magenta": MAG, "cyan": CYN}
+
+def load_accent():
+    """Prefix color for this session's CLAUDE_CONFIG_DIR; DIM if no rule."""
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or "-"
+    cfg = cfg.rstrip("/") or "/"
+    cfgbase = os.path.basename(cfg) or cfg
+    try:
+        with open(profile_config_path()) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                if parts[0] not in (cfg, cfgbase):
+                    continue
+                return ACCENTS.get(parts[1], DIM)
+    except OSError:
+        pass
+    return DIM
+
 def decode_icon(tok):
     """'U+F013' / '0xF013' -> the glyph; any other token is a literal glyph."""
     if len(tok) > 2 and tok[0] in "Uu" and tok[1] == "+":
@@ -606,7 +636,7 @@ def main():
 
     # --- dirs ---
     userhost = get_user_host()
-    prefix = c(f"{userhost}:", DIM) if userhost else ""
+    prefix = c(f"{userhost}:", load_accent()) if userhost else ""
 
     current = dig(data, "workspace", "current_dir") or data.get("cwd") or os.getcwd()
     launch  = dig(data, "workspace", "project_dir") or current

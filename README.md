@@ -27,6 +27,7 @@ everything, in one line, worth keeping on screen for hours.
 ## Features
 
 - **Directories**: `user@host:` prefix, launch and current dir, `~`-shortened; collapsed when equal
+- **Profile accent**: optional per-`CLAUDE_CONFIG_DIR` color on the prefix, to tell concurrent instances apart
 - **Model + context**: active model name, reasoning-effort level, context-window usage % and max size (`18%200K`)
 - **Plan usage**: 5h and 7d windows with reset countdowns (`20%4h9m`); subscribers only
 - **Battery**: charge % with a level glyph, distinct while charging; time since full (`3h20m`), hidden while charging or after a partial recharge
@@ -77,6 +78,7 @@ Environment toggles:
 - `CLAUDE_STATUSLINE_NERD=0`: plain-text labels instead of Nerd Font glyphs
 - `CLAUDE_STATUSLINE_BATTERY=0`: hide the battery segment (for desktops/VMs with a phantom/synthetic ACPI battery)
 - `CLAUDE_STATUSLINE_SERVICES=<path>`: path to the optional [services segment](docs/services.md) config (default: `services.conf` next to the binary)
+- `CLAUDE_STATUSLINE_PROFILE=<path>`: path to the optional [profile accent](docs/profile.md) config (default: `profile.conf` next to the binary)
 
 ## Local preview + profiling
 

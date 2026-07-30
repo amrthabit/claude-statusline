@@ -72,6 +72,8 @@
 #define YLW  "\033[33m"
 #define RED  "\033[31m"
 #define CYN  "\033[36m"
+#define BLU  "\033[34m"
+#define MAG  "\033[35m"
 
 static bool NERD = true;
 static const char *HOME = "";
@@ -1228,6 +1230,65 @@ static bool usage_seg(const char *rl, const char *node, const char *glyph, SB *d
     return true;
 }
 
+/* Optional profile accent. Claude Code can run several instances side by side
+ * under different config dirs (CLAUDE_CONFIG_DIR), each with its own account
+ * and session history but an identical statusline - so the prefix takes a
+ * color per config dir to tell them apart at a glance. Config file is
+ * machine-local, one rule per line:
+ *     <config-dir>  <color>
+ * <config-dir> matches CLAUDE_CONFIG_DIR in full or by basename; "-" matches
+ * a session with CLAUDE_CONFIG_DIR unset. First match wins, no match leaves
+ * the prefix at its default intensity.                                       */
+static const char *accent_color(const char *name) {
+    if (!strcmp(name, "red"))     return RED;
+    if (!strcmp(name, "green"))   return GRN;
+    if (!strcmp(name, "yellow"))  return YLW;
+    if (!strcmp(name, "blue"))    return BLU;
+    if (!strcmp(name, "magenta")) return MAG;
+    if (!strcmp(name, "cyan"))    return CYN;
+    return NULL;
+}
+
+static const char *load_accent(void) {
+    char path[1088];   /* exe dir (<=1024) + "/profile.conf" */
+    const char *env = getenv("CLAUDE_STATUSLINE_PROFILE");
+    if (env && env[0]) {
+        snprintf(path, sizeof path, "%s", env);
+    } else {
+        char exe[1024];
+        ssize_t r = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (r <= 0) return DIM;
+        exe[r] = 0;
+        char *slash = strrchr(exe, '/');
+        if (!slash) return DIM;
+        *slash = 0;
+        snprintf(path, sizeof path, "%s/profile.conf", exe);
+    }
+    char buf[4096];
+    if (rdfile(path, buf, sizeof buf) <= 0) return DIM;
+
+    char cfg[512];
+    const char *ce = getenv("CLAUDE_CONFIG_DIR");
+    snprintf(cfg, sizeof cfg, "%s", (ce && ce[0]) ? ce : "-");
+    size_t cl = strlen(cfg);
+    while (cl > 1 && cfg[cl - 1] == '/') cfg[--cl] = 0;
+    const char *slash = strrchr(cfg, '/');
+    const char *cfgbase = (slash && slash[1]) ? slash + 1 : cfg;
+
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line || *line == '#') continue;
+        char key[512] = "", col[32] = "";
+        if (sscanf(line, "%511s %31s", key, col) < 2) continue;
+        if (strcmp(key, cfg) != 0 && strcmp(key, cfgbase) != 0) continue;
+        const char *a = accent_color(col);
+        return a ? a : DIM;
+    }
+    return DIM;
+}
+
 int main(void) {
     HOME = getenv("HOME");
     if (!HOME) HOME = "";
@@ -1251,7 +1312,7 @@ int main(void) {
     /* --- dirs --- */
     char userhost[288];
     if (get_user_host(userhost, sizeof userhost))
-        sb_c(&dirs, DIM, "%s:", userhost);
+        sb_c(&dirs, load_accent(), "%s:", userhost);
 
     const char *ws = jget(root, "workspace");
     char curbuf[2048], launchbuf[2048], cwdbuf[1024];
