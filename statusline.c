@@ -508,6 +508,21 @@ static int rdfirst(const char *path, char *buf, size_t cap) { /* one read() */
     buf[n] = 0;
     return (int)n;
 }
+/* Claude's pid, the number in its cbus box: our parent, or the shell's
+ * parent if Claude ran us through sh -c.                                  */
+static int claude_pid(void) {
+    int p = (int)getppid();
+    char path[40], b[256];
+    snprintf(path, sizeof path, "/proc/%d/comm", p);
+    if (rdfirst(path, b, sizeof b) > 0 &&
+        (!strcmp(b, "sh\n") || !strcmp(b, "bash\n") || !strcmp(b, "dash\n"))) {
+        snprintf(path, sizeof path, "/proc/%d/stat", p);
+        const char *r = rdfirst(path, b, sizeof b) > 0 ? strrchr(b, ')') : NULL;
+        int pp;
+        if (r && sscanf(r, ") %*c %d", &pp) == 1) p = pp;
+    }
+    return p;
+}
 static const char *next_line(const char *p) {
     p = strchr(p, '\n');
     return p ? p + 1 : NULL;
@@ -1514,13 +1529,8 @@ int main(void) {
     }
 
     {
-        time_t tt = time(NULL);
-        struct tm tmv;
-        char dtbuf[32];
-        if (localtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%-d%b%H:%M", &tmv)) {
+        {
             SYS_SEP();
-            sb_c(&sys_, DIM, "%s", dtbuf);
-            sb_raw(&sys_, " ");
             sb_c(&sys_, DIM, "%s", G->sessions);
             ICON_SEP();
             sb_c(&sys_, DIM, "%d", rates.sessions);
@@ -1539,6 +1549,16 @@ int main(void) {
      * no stdout stdio (avoids its lazy-init ioctl/fcntl and writev)         */
     static const char SEG_SEP[] = " " DIM u8"│" RST " ";
     SB out = {0};
+    {   /* UTC date and Claude's pid lead the line (owner, 2026-10-25) */
+        time_t tt = time(NULL);
+        struct tm tmv;
+        char dtbuf[32];
+        if (gmtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%-d%b%H:%MZ", &tmv))
+            sb_c(&out, DIM, "%s", dtbuf);
+        sb_raw(&out, " ");
+        sb_c(&out, DIM, "%d", claude_pid());
+        sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
+    }
     sb_cat(&out, dirs.buf, dirs.len);
     sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
     sb_cat(&out, mid.buf, mid.len);

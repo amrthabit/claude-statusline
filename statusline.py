@@ -625,6 +625,17 @@ def services_segment():
     return " ".join(parts)
 
 # ----------------------------------------------------------------- main ----
+def claude_pid():
+    # Claude's pid, the number in its cbus box: our parent, or the shell's
+    # parent if Claude ran us through sh -c.
+    p = os.getppid()
+    try:
+        if open(f"/proc/{p}/comm").read() in ("sh\n", "bash\n", "dash\n"):
+            p = int(open(f"/proc/{p}/stat").read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return p
+
 def main():
     raw = sys.stdin.read()
     try:
@@ -785,13 +796,14 @@ def main():
                         c(G["net"], DIM) + ICON_SEP +
                         c(f"↑{human(txb)}", rate_color(txb)))
 
-    sysparts.append(c(time.strftime("%-d%b%H:%M"), DIM) + " " +
-                    c(G["sessions"], DIM) + ICON_SEP +
+    sysparts.append(c(G["sessions"], DIM) + ICON_SEP +
                     c(f"{sessions}", DIM))
 
     if sysparts:
         segs.append(" ".join(sysparts))
 
+    # UTC date and Claude's pid lead the line (owner, 2026-10-25)
+    segs.insert(0, c(time.strftime("%-d%b%H:%MZ", time.gmtime()), DIM) + " " + c(str(claude_pid()), DIM))
     dsep = c("│", DIM)
     sys.stdout.write((f" {dsep} ").join(segs))
 
