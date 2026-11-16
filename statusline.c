@@ -1517,7 +1517,7 @@ int main(void) {
         time_t tt = time(NULL);
         struct tm tmv;
         char dtbuf[32];
-        if (localtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%-d%b%H:%M", &tmv)) {
+        if (localtime_r(&tt, &tmv) && strftime(dtbuf, sizeof dtbuf, "%-d%b", &tmv)) {
             SYS_SEP();
             sb_c(&sys_, DIM, "%s", dtbuf);
             sb_raw(&sys_, " ");
@@ -1539,6 +1539,15 @@ int main(void) {
      * no stdout stdio (avoids its lazy-init ioctl/fcntl and writev)         */
     static const char SEG_SEP[] = " " DIM u8"│" RST " ";
     SB out = {0};
+    {
+        time_t tt = time(NULL);
+        struct tm tmv;
+        char clk[16];
+        if (localtime_r(&tt, &tmv) && strftime(clk, sizeof clk, "%H:%M:%S", &tmv)) {
+            sb_c(&out, DIM, "%s", clk);
+            sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
+        }
+    }
     sb_cat(&out, dirs.buf, dirs.len);
     sb_cat(&out, SEG_SEP, sizeof SEG_SEP - 1);
     sb_cat(&out, mid.buf, mid.len);
